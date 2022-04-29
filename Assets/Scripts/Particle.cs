@@ -40,9 +40,7 @@ public class Particle : Object
     public bool massDirty = true; // dirty flag for mass
     public double lastRenderX = double.PositiveInfinity;
     public double lastRenderY = double.PositiveInfinity;
-    private static double lastRenderUpdateThreshold = 1e-2f;
-    
-    
+    private static double lastRenderUpdateThreshold = 1e-4f;
     
     public Particle(string name, int id, double x, double y, double vx, double vy, double mass, Main main, bool isBlackHole = false)
     {
@@ -60,6 +58,7 @@ public class Particle : Object
         this.gameObject.transform.position = new Vector2((float)x,(float)y);
         this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = main.yellowDwarfMaterial;
         this.material = this.gameObject.GetComponent<MeshRenderer>().sharedMaterial;
+
         this.transform = this.gameObject.transform;
         this.isBlackHole = isBlackHole;
         this.main = main;
@@ -67,7 +66,7 @@ public class Particle : Object
     }
 
     private static double[] starClassMinimumTemperatures = {
-        200, 700, 1300, 2000, 3700, 5200, 6000, 7500, 10000, 33000, 1e6,
+        200, 700, 1300, 2000, 3700, 5200, 6000, 7500, 10000, 33000, 60000,
     };
 
     private static string[] starClasses = {
@@ -161,6 +160,10 @@ public class Particle : Object
 
     private void updateTemperature()
     {
+        /* L = SB * 4pi * r^2 * T^4
+         * T^4 = L / ( SB * 4 * pi * r^2)
+         * T = pow(L / SB / 4 / pi / r^2, 0.25)
+         */
         double Rt = this.radius * r_Jupiter;
         this.temperature = Pow(this.luminosity / 4 / PI / Rt / Rt / SB, 0.25);
     }
@@ -197,18 +200,26 @@ public class Particle : Object
         {
             this.radius = Sqrt(this.mass) / 5000;
         }
-        else if (this.mass > 119) // 62.7 jupiter masses / 0.06 solar masses, dominated by fusion / gravity pressure
+        // above about 150 solar masses i.e. 300 000 e27 kg, further growth becomes impossible as extreme temperatures expel the outer layers of a star.
+        // But we don't model that here :)
+        else if (this.mass > 159) // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
         {
-            this.radius = 0.00089 * Pow(this.mass, 0.88) * 17;
+            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.43;
         }
-        else if (this.mass > 0.6) // 100 earth masses / 0.31 jupiter masses -> jupiter-class, dominated by degeneracy pressure
+        else if (this.mass > 0.778) // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
         {
-            this.radius = 0.0725 * Pow(this.mass, -0.04) * 17; // 0.0600 at upper end
+            this.radius = 3.36 * Pow(this.mass, -0.04) * 0.43; // 3.01 at upper end before scaling
         }
-        else  // less than 100 earth masses, assume neptune class -> dominated by gas envelopes
+        else if (this.mass > 0.012)  // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
         {
-            this.radius = 0.1 * Pow(mass, 0.59) * 17; // 0.0740 at upper end
+            this.radius = 3.94 * Pow(mass, 0.59) * 0.43; // 3.40 at upper end before scaling
         }
+        else // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression
+        {
+            this.radius = 1.0 * Pow(mass, 0.28) * 0.43; // 0.290 at upper end before scaling
+        }
+        // below about 1e-6 units, objects begin to deviate significantly from round, and mean radius can't be predicted from mass even with known composition
+        // but we don't model that here either
     }
 
     private void updateColor()

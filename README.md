@@ -37,6 +37,10 @@ collided. Finally, it steps through all the particles a last time to update thei
 Several key positions in the CPU code check the time that has passed since the last frame every n loops, with the thread yielding
 if too much time has passed. This transfers control temporarily back to the other threads handling renderering, mouse inputs, etc. and also
 guarantees the CPU is able to respond to requests to close or pause the program.
+
+If the number of living particles falls below half the size of the particle array, the array is reduced to half its size to reduce memory
+consumption and slightly speed up the O(N) loops over it.
+
 ## Package Structure ##
 
 Only the Assets folder is related to the simulation itself. The other folders contain assets used by Unity to set up and run

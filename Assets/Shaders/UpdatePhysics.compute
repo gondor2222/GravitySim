@@ -3,11 +3,12 @@
 #pragma kernel ComputeBarnesHut
 
 struct InputType {
-    int removed;
     double2 pos;
     double2 v;
     double mass;
     double radius;
+    int removed;
+    int placeholder;
 };
 
 struct InputTypeQuadTreeNode {
@@ -122,37 +123,39 @@ void Compute(uint3 id : SV_DispatchThreadID)
         output.idx = i;
         output.a = double2(0, 0);
         collisions = int4(-1, -1, -1, -1);
-        for (int j = 0; j < numParticles; j++) {
-            InputType p2 = inputData[j];
+        if (!p1.removed) {
+            for (int j = 0; j < numParticles; j++) {
+                InputType p2 = inputData[j];
 
-            /* doesn't actually improve performance on most GPU platforms, since if statements
-            * usually result in the threads splitting with the half of the threads in the `if`
-            * either awaiting the other half or running the operations anyway and discarding
-            * the results.
-            */
-            if (p1.removed || p2.removed || i == j) {
-                continue;
+                /* doesn't actually improve performance on most GPU platforms, since if statements
+                * usually result in the threads splitting with the half of the threads in the `if`
+                * either awaiting the other half or running the operations anyway and discarding
+                * the results.
+                */
+                if (p2.removed || i == j) {
+                    continue;
+                }
+                // instead of using current particle position, use particle position in the middle
+                // of the step using current velocity
+                dpos = p2.pos + halfStepSize * p2.v - p1.pos - halfStepSize * p1.v;
+
+                /* cast to float to silence compiler warnings. Yes, we lose precision here :(
+                * Most GPUs unfortunately still don't support double-compatible sqrt, and the performance
+                * penalty is severe in those that do
+                */
+                r = sqrt((float)(dpos.x * dpos.x + dpos.y * dpos.y));
+
+                // save collision ID if collision detected
+                // will store ID to first component and then right-cycle-shift elements of collisions
+                // e.g. (-1, -1, -1, -1) -> (j, -1, -1, -1) -> (-1, j, -1, -1)
+                // cannot use variable indexing inside this if because it confuses the compiler
+                if (p1.radius + p2.radius > r) {
+                    collisions.x = j;
+                    collisions = mul(rotateComponents, collisions);
+                } 
+
+                output.a += gStepSize * p2.mass * dpos / ( r * r * r);
             }
-            // instead of using current particle position, use particle position in the middle
-            // of the step using current velocity
-            dpos = p2.pos + halfStepSize * p2.v - p1.pos - halfStepSize * p1.v;
-
-            /* cast to float to silence compiler warnings. Yes, we lose precision here :(
-            * Most GPUs unfortunately still don't support double-compatible sqrt, and the performance
-            * penalty is severe in those that do
-            */
-            r = sqrt((float)(dpos.x * dpos.x + dpos.y * dpos.y));
-
-            // save collision ID if collision detected
-            // will store ID to first component and then right-cycle-shift elements of collisions
-            // e.g. (-1, -1, -1, -1) -> (j, -1, -1, -1) -> (-1, j, -1, -1)
-            // cannot use variable indexing inside this if because it confuses the compiler
-            if (p1.radius + p2.radius > r) {
-                collisions.x = j;
-                collisions = mul(rotateComponents, collisions);
-            } 
-
-            output.a += gStepSize * p2.mass * dpos / ( r * r * r);
         }
         output.collisions = collisions;
         outputData[i - startIndex] = output;
@@ -187,6 +190,9 @@ void ComputeBarnesHut(uint3 id : SV_DispatchThreadID) {
         output.a = double2(0, 0);
         collisions = int4(-1, -1, -1, -1);
         nodeToCheck = 0;
+        if (p1.removed) {
+            return;
+        }
         while (nodeToCheck != -1) {
             node = inputDataQuadTreeNodes[nodeToCheck];
             if (node.child == -1) { // leaf node

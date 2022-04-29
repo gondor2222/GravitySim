@@ -33,7 +33,7 @@ public class MainBarnesHut : Main
     
     private int[] nodesToCheck;
 
-    protected override void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType outputPixel)
+    protected override void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType outputPixel, bool printDebug=false)
     {
         double dx, dy, r, a, distanceToNode;
         int collisionIndex = 0, nodeToCheck = 0;
@@ -45,6 +45,10 @@ public class MainBarnesHut : Main
             {
                 if (node.particleId != p1.id) // ignore self-interaction
                 {
+                    if (printDebug)
+                    {
+                        Debug.Log(string.Format("Particle {0} checking leaf particle {1}", p1.id, node.particleId));
+                    }
                     dx = node.centerOfMassX - p1.x;
                     dy = node.centerOfMassY - p1.y;
                     r = Sqrt(dx * dx + dy * dy);
@@ -59,13 +63,13 @@ public class MainBarnesHut : Main
                                 outputPixel.collisions0 = node.particleId;
                                 break;
                             case 1:
-                                outputPixel.collisions0 = node.particleId;
+                                outputPixel.collisions1 = node.particleId;
                                 break;
                             case 2:
-                                outputPixel.collisions0 = node.particleId;
+                                outputPixel.collisions2 = node.particleId;
                                 break;
                             case 3:
-                                outputPixel.collisions0 = node.particleId;
+                                outputPixel.collisions3 = node.particleId;
                                 break;
                         }
                         collisionIndex++;
@@ -85,22 +89,32 @@ public class MainBarnesHut : Main
                     outputPixel.ax += a * dx / r;
                     outputPixel.ay += a * dy / r;
                     nodeToCheck = node.nextNode;
+                    
                 }
                 else
                 {
+                    if (printDebug)
+                    {
+                        Debug.Log(string.Format("Particle {0} descending into node {1}'s children", p1.id, nodeToCheck));
+                    }
                     nodeToCheck = node.children[0];
                 }
             }
         }
     }
 
-    private void initializeShaderBarnesHut(ComputeBuffer nodeListBuffer)
+    private async Task initializeShaderBarnesHut(ComputeBuffer nodeListBuffer)
     {
         PhysicsShaderQuadTreeNode node;
 
         NativeArray<PhysicsShaderQuadTreeNode> nodeListInput = nodeListBuffer.BeginWrite<PhysicsShaderQuadTreeNode>(0, nodeList.Length);
         for (int i = 0; i < nodeList.Length; i++)
         {
+            if (i % Main.numParticleChecksPerYieldCheck == 0)
+            {
+                await Main.yieldCpuIfFrameTooLong();
+            }
+            await Main.yieldCpuIfFrameTooLong();
             node.particleId = nodeList[i].particleId;
             node.child = nodeList[i].children[0];
             node.nextNode = nodeList[i].nextNode;
@@ -118,13 +132,39 @@ public class MainBarnesHut : Main
 
     override protected async Task gravitate()
     {
-        QuadTreeNode.fillNodeArray(nodeList, particles);
+        await QuadTreeNode.initializeNodeArray(nodeList, particles);
 
         ComputeBuffer nodeListBuffer = new ComputeBuffer(nodeList.Length, 48, ComputeBufferType.Default, ComputeBufferMode.SubUpdates);
-        initializeShaderBarnesHut(nodeListBuffer);
+        await initializeShaderBarnesHut(nodeListBuffer);
         await base.gravitate();
-
         nodeListBuffer.Release();
+    }
+
+    private List<int> findParticleInNodes(int id, QuadTreeNode[] nodes, int nodeIdx)
+    {
+        List<int> pathToNode = new List<int>();
+        if (nodes[nodeIdx].particleId == id)
+        {
+            pathToNode.Add(nodeIdx);
+            return pathToNode;
+        }
+        else
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                int childIdx = nodes[nodeIdx].children[i];
+                if (childIdx != -1) {
+                    List<int> childPath = findParticleInNodes(id, nodes, childIdx);
+                    if (childPath.Count > 0)
+                    {
+                        pathToNode.Add(nodeIdx);
+                        pathToNode.AddRange(childPath);
+                        return pathToNode;
+                    }
+                }
+            }
+        }
+        return pathToNode;
     }
 
     override protected void reduceParticleCount(int newParticleArraySize)
