@@ -24,14 +24,10 @@ public class MainBarnesHut : Main
     // center of mass is smaller than this, that node will be ignored.
     private static double barnesHutThreshold = 0.5;
     // Start is called before the first frame update
-    new protected void Start()
+    protected override async Task Start()
     {
-        base.Start();
-        nodeList = new QuadTreeNode[(int)(2 * particles.Length)];
+        await base.Start();
     }
-
-    
-    private int[] nodesToCheck;
 
     protected override void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType outputPixel, bool printDebug=false)
     {
@@ -128,6 +124,12 @@ public class MainBarnesHut : Main
         nodeListBuffer.EndWrite<PhysicsShaderQuadTreeNode>(nodeList.Length);
         computeShader.SetBuffer(computeShaderKernelIndex, "inputDataQuadTreeNodes", nodeListBuffer);
         computeShader.SetFloat("barnesHutThreshold", (float)barnesHutThreshold);
+    }
+
+    override protected async Task initVariables() {
+        await base.initVariables();
+        Debug.Log("Initializing node list");
+        nodeList = new QuadTreeNode[(int)(2 * particles.Length)];
     }
 
     override protected async Task gravitate()

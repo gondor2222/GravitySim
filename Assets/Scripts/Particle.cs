@@ -5,21 +5,20 @@ using UnityEngine.Rendering;
 using Unity.Collections;
 using static System.Math;
 
-public class Particle : Object
+public class Particle
 {
 
     public static readonly double PI = 3.1415926535;
     public static readonly double L_Sun = 3.83E26;
     public static readonly double r_Jupiter = 6.9173E7;
     public static readonly double SB = 5.670373E-8;
-    public static readonly double radiusScale = 1f; // display objects larger than they actually are by this factor
+    public static readonly double radiusScale = 10f; // display objects larger than they actually are by this factor
 
     public volatile GameObject gameObject;
     private Material material;
     private volatile Transform transform;
-    private readonly Main main;
 
-    public new string name;
+    public string name;
     public int id;
 
     public double x;
@@ -27,13 +26,13 @@ public class Particle : Object
     public double vx;
     public double vy;
     public double mass; // units of 1e27 kg
+    public bool isBlackHole;
 
     public double temperature;
     public double lifeLeft;
     public double radius;
     public double luminosity;
-    public string starClass;
-    public bool isBlackHole;
+    public string objectClass;
     public Color color;
     
     public bool removed;
@@ -42,7 +41,7 @@ public class Particle : Object
     public double lastRenderY = double.PositiveInfinity;
     private static double lastRenderUpdateThreshold = 1e-4f;
     
-    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, Main main, bool isBlackHole = false)
+    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, bool isBlackHole = false)
     {
         this.name = name;
         this.id = id;
@@ -53,36 +52,57 @@ public class Particle : Object
         this.mass = mass;
 
         this.gameObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        DestroyImmediate(this.gameObject.GetComponent<SphereCollider>());
+        Object.DestroyImmediate(this.gameObject.GetComponent<SphereCollider>());
         this.gameObject.name = name;
         this.gameObject.transform.position = new Vector2((float)x,(float)y);
-        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = main.yellowDwarfMaterial;
+        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.yellowDwarfMaterial;
         this.material = this.gameObject.GetComponent<MeshRenderer>().sharedMaterial;
 
         this.transform = this.gameObject.transform;
         this.isBlackHole = isBlackHole;
-        this.main = main;
         this.lifeLeft = 1;
     }
 
     private static double[] starClassMinimumTemperatures = {
-        200, 700, 1300, 2000, 3700, 5200, 6000, 7500, 10000, 33000, 60000,
+          200, // < 200 = P
+          700, // < 700 = Y
+         1300, // < 1300 = T
+         2000, // < 2000 = L
+         3700, // < 3700 = M
+         5200, // < 5200 = K
+         6000, // < 6000 = G
+         7500, // < 7500 = F
+        10000, // < 10000 = A
+        30000, // < 30000 = B
+        60000, // < 60000 = O
+        // > 60000 = WR
     };
 
     private static string[] starClasses = {
-        "P", "Y", "T", "L", "M", "K", "G", "F", "A", "O", "WR"
+        "P-class Brown Dwarf",
+        "Y-class Brown Dwarf",
+        "T-class Brown Dwarf",
+        "L-class Brown Dwarf",
+        "M-class Star",
+        "K-class Star",
+        "G-class Star",
+        "F-class Star",
+        "A-class Star",
+        "B-class Star",
+        "O-class Star",
+        "WR-class Star"
     };
 
     public void updateNonPhysics(double stepSize) {
         if (massDirty)
         {
-            string oldStarClass = starClass;
+            string oldStarClass = objectClass;
             updateRadius();
             updateLuminosity();
             updateTemperature();
             updateColor();
             updateStarClass();
-            updateGameObject(oldStarClass != starClass);
+            updateGameObject(oldStarClass != objectClass);
             massDirty = false;
             float diameter = (float)(2 * radiusScale * radius * Main.displayScale);
             transform.localScale = new Vector3(diameter, diameter, diameter);
@@ -112,25 +132,35 @@ public class Particle : Object
             newBlock.SetFloat("_BaseTemperature", (float)temperature);
             if (classChanged)
             {
-                switch (starClass)
+                switch (objectClass)
                 {
-                    case "O":
-                    case "B":
-                    case "A":
+                    case "O-class Star":
+                    case "B-class Star":
+                    case "A-class Star":
                         // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
                         break;
-                    case "F":
-                    case "G":
-                    case "K":
+                    case "F-class Star":
+                    case "G-class Star":
+                    case "K-class Star":
                         // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
                         break;
-                    case "M":
+                    case "M-class Star":
                         // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
                         break;
-                    case "L":
-                    case "T":
-                    case "Y":
+                    case "L-class Brown Dwarf":
+                    case "T-class Brown Dwarf":
+                    case "Y-class Brown Dwarf":
                         // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        break;
+                    
+                    case "Gas Planet":
+
+                        break;
+                    case "Rocky Planet":
+
+                        break;
+                    case "Black Hole":
+
                         break;
                     default:
                         // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
@@ -146,15 +176,20 @@ public class Particle : Object
     {
         if (isBlackHole)
         {
-            starClass = "X";
+            objectClass = "Black Hole";
         }
-        for (int i = 0; i < starClassMinimumTemperatures.Length; i++)
-        {
-            if (temperature < starClassMinimumTemperatures[i])
-            {
-                starClass = starClasses[i];
-                break;
+        if (this.mass < 2 * Main.earthMass) {
+            objectClass = "Rocky Planet";
+        } else if (this.mass < 5 * Main.jupiterMass) {
+            objectClass = "Gas Planet";
+        } else {
+            for (int i = 0; i < starClassMinimumTemperatures.Length; i++) {
+                if (temperature < starClassMinimumTemperatures[i]) {
+                    objectClass = starClasses[i];
+                    return;
+                }
             }
+            objectClass = starClasses[starClassMinimumTemperatures.Length];
         }
     }
 
@@ -363,7 +398,7 @@ public class Particle : Object
     public void remove()
     {
         this.removed = true;
-        DestroyImmediate(this.gameObject);
+        Object.DestroyImmediate(this.gameObject);
         this.gameObject = null;
     }
 

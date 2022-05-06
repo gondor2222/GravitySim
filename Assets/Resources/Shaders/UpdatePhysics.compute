@@ -1,0 +1,233 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Compute
+#pragma kernel ComputeBarnesHut
+
+struct InputType {
+    double2 pos;
+    double2 v;
+    double mass;
+    double radius;
+    int removed;
+    int placeholder;
+};
+
+struct InputTypeQuadTreeNode {
+    int particleId;
+    int child;
+    int nextNode;
+    double totalMass;
+    double2 centerOfMass;
+    double width;
+};
+
+struct OutputType {
+    int idx; // echo i index of particle in interaction for debug purposes
+    uint threadId;
+    double2 a; // resulting acceleration vector
+    int4 collisions;
+};
+
+int startIndex; // offset into particle array to begin calculations
+// number of columns in the interaction matrix to calculate per thread
+int particlesPerThread;
+// number of particles being simulated
+int numParticles;
+
+// gravitational constant times simultation step size
+// This is a global constant, so using a float instead of a double is fine
+float g;
+float stepSize;
+float barnesHutThreshold; // threshold below which tree nodes will be treated as a single particle
+
+StructuredBuffer<InputType> inputData : register(t0);
+StructuredBuffer<InputTypeQuadTreeNode> inputDataQuadTreeNodes: register(t1);
+RWStructuredBuffer<OutputType> outputData : register(u0);
+
+
+/*
+* Let n be the number of particles to simulate
+* Let G be the gravitational constant
+* Let r_ij be the vector pointing from particle i to particle j
+* let s be the step size for the simulation
+* There are n^2 possible interactions between all particles i,j
+* 
+* i\j 0 1 2 3 4 5
+* 0   . . . . . .
+* 1   . . . . . .
+* 2   . . . . . .
+* 3   . . . . . .
+* 4   . . . . . .
+* 5   . . . . . .
+*
+* But we can exclude n interactions between any particle i and itself,
+* since this interaction is always 0
+* 
+* i\j 0 1 2 3 4 5
+* 0     . . . . .
+* 1   .   . . . .
+* 2   . .   . . .
+* 3   . . .   . .
+* 4   . . . .   .
+* 5   . . . . .
+* 
+* The acceleration on particle i due to particle j, a_ij is G * r_ij * m_j / |r_ij|^3
+* The acceleration on particle j due to particle i, a_ji is G * r_ji * m_i / |r_ji|^3
+* Note that since r_ji = -r_ij, a_ji = -a_ij * m_i/m_j
+* Thus, the thread calculating a_ij can with two multiplications and a division also
+* calculate a_ji, which is much more efficient than calculating both separately.
+* 
+* ### CSMAIN2 ###
+* Normally, we could reuse calculation a_ij for a_ji instead of calculating them
+* separately, but since a given thread only has access to a_ij for all i and a fixed subset
+* of j, this would require communication between threads for a thread calculating a_ij to
+* share its results with the thread calculating a_ji. This would be doable if we parallelized all
+* the interactions as the n^2 version of this shader does and then accumulate by particle, but this
+* requires that the work done by all threads covers all particles in a given dispatch, as even if
+* we calculate a_ij, there will usually be no thread using a_ji since, or vice versa. Calculating
+* for all particles in a given dispatch is prohibitively expensive since the dispatch is then in O(n^2)
+* 
+* To simplify the dispatch, we thus calculate only net acceleration on some subset of particles, so the
+* work per dispatch is O(n).
+*
+* This shader uses 512 threads and calculates net acceleration on `512 * columnsPerThread` particles per
+* dispatch, from columns `startIndex2` through `startIndex2 + 512 * columnsPerThread`
+* It is thus highly recommended that n is even and that 512 * `columnsPerThread` divides both startIndex2
+* and n, to simplify the arithmetic when synchronizing results between dispatches.
+*
+* If startIndex2 + 512 * columnsPerThread is greater than n, buffer overflows may occur because the shader
+* will attempt to read inputData[i] and/or write to outputData[i] for i >= n
+*/
+
+[numthreads(512, 1, 1)]
+void Compute(uint3 id : SV_DispatchThreadID)
+{
+    OutputType output;
+    int threadStartIndex = startIndex + particlesPerThread * id.x;
+    output.threadId = id.x;
+
+    double gStepSize = g * stepSize;
+    double halfStepSize = 0.5 * stepSize;
+    double r;
+    double2 dpos;
+    int4 collisions;
+
+    int4x4 rotateComponents = {
+        0, 0, 0, 1,
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0
+    };
+
+    for (int i = threadStartIndex; i < threadStartIndex + particlesPerThread; i++) {
+        InputType p1 = inputData[i];
+        output.idx = i;
+        output.a = double2(0, 0);
+        collisions = int4(-1, -1, -1, -1);
+        if (!p1.removed) {
+            for (int j = 0; j < numParticles; j++) {
+                InputType p2 = inputData[j];
+
+                /* doesn't actually improve performance on most GPU platforms, since if statements
+                * usually result in the threads splitting with the half of the threads in the `if`
+                * either awaiting the other half or running the operations anyway and discarding
+                * the results.
+                */
+                if (p2.removed || i == j) {
+                    continue;
+                }
+                // instead of using current particle position, use particle position in the middle
+                // of the step using current velocity
+                dpos = p2.pos + halfStepSize * p2.v - p1.pos - halfStepSize * p1.v;
+
+                /* cast to float to silence compiler warnings. Yes, we lose precision here :(
+                * Most GPUs unfortunately still don't support double-compatible sqrt, and the performance
+                * penalty is severe in those that do
+                */
+                r = sqrt((float)(dpos.x * dpos.x + dpos.y * dpos.y));
+
+                // save collision ID if collision detected
+                // will store ID to first component and then right-cycle-shift elements of collisions
+                // e.g. (-1, -1, -1, -1) -> (j, -1, -1, -1) -> (-1, j, -1, -1)
+                // cannot use variable indexing inside this if because it confuses the compiler
+                if (p1.radius + p2.radius > r) {
+                    collisions.x = j;
+                    collisions = mul(rotateComponents, collisions);
+                } 
+
+                output.a += gStepSize * p2.mass * dpos / ( r * r * r);
+            }
+        }
+        output.collisions = collisions;
+        outputData[i - startIndex] = output;
+    }
+}
+
+[numthreads(512, 1, 1)]
+void ComputeBarnesHut(uint3 id : SV_DispatchThreadID) {
+    OutputType output;
+    int threadStartIndex = startIndex + particlesPerThread * id.x;
+    output.threadId = id.x;
+
+    int4 collisions = int4(-1, -1, -1, -1);
+
+    double gStepSize = g * stepSize;
+    double r, distanceToNode;
+    double2 dpos;
+
+    int4x4 rotateComponents = {
+        0, 0, 0, 1,
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0
+    };
+
+    InputTypeQuadTreeNode node;
+    int nodeToCheck;
+
+    for (int i = threadStartIndex; i < threadStartIndex + particlesPerThread; i++) {
+        InputType p1 = inputData[i];
+        output.idx = i;
+        output.a = double2(0, 0);
+        collisions = int4(-1, -1, -1, -1);
+        nodeToCheck = 0;
+        if (p1.removed) {
+            return;
+        }
+        while (nodeToCheck != -1) {
+            node = inputDataQuadTreeNodes[nodeToCheck];
+            if (node.child == -1) { // leaf node
+                if (node.particleId != i) { // ignore self-interaction
+                    dpos = node.centerOfMass - p1.pos;
+                    r = length((float2)dpos);
+
+                    // save collision ID if collision detected
+                    // will store ID to first component and then right-cycle-shift elements of collisions
+                    // e.g. (-1, -1, -1, -1) -> (j, -1, -1, -1) -> (-1, j, -1, -1)
+                    // cannot use variable indexing inside this if because it confuses the compiler
+                    if (p1.radius + node.width > r) {
+                        collisions.x = node.particleId;
+                        collisions = mul(rotateComponents, collisions);
+                    }
+
+                    output.a += gStepSize * node.totalMass * dpos / (r * r * r);
+                }
+                nodeToCheck = node.nextNode;
+            }
+            else { // internal node
+                distanceToNode = length((float2)(node.centerOfMass - p1.pos));
+                if (node.width / distanceToNode < barnesHutThreshold) { // treat as leaf, skip over children
+                    dpos = node.centerOfMass - p1.pos;
+                    r = length((float2)dpos);
+
+                    output.a += gStepSize * node.totalMass * dpos / ( r * r * r);
+                    nodeToCheck = node.nextNode;
+                } else { // traverse children
+                    nodeToCheck = node.child;
+                }
+            }
+        }
+
+        output.collisions = collisions;
+        outputData[i - startIndex] = output;
+    }
+}

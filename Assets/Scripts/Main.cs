@@ -1,14 +1,15 @@
 #define DEBUG_PHYSICS
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using System.IO;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Collections;
 using UnityEngine.UI;
-using System.Threading.Tasks;
 using static System.Math;
-
 
 // Information about particles to be used by the GPU
 [StructLayout(LayoutKind.Explicit, Size=52)]
@@ -48,9 +49,9 @@ public class Main : MonoBehaviour
 {
 
     // particle array
-    protected Particle[] particles;
+    protected volatile Particle[] particles;
     // initial number of particles and initial capacity of particle array
-    public static int initNumParticles = 1024 * 256;
+    public static int initNumParticles = 1024 * 512;
     // smallest length of particle array, i.e. guaranteed minimum capacity for particle array at all times
     public static int minParticleBufferSize = 512;
 
@@ -65,7 +66,6 @@ public class Main : MonoBehaviour
 
     // number of threads used by the UpdatePhysics compute shader
     protected static readonly int numGpuThreads = 512;
-
 
     // Mass of various objects in 1e27 kg units
     // 243 = proxima centauri
@@ -83,23 +83,10 @@ public class Main : MonoBehaviour
     public static double moonMass = 0.0735e-3;
     
     // initial mass of particles (also 1e27 kg units)
-    public static double initialMass = 1.0e-3;
+    public static double initialMass = 0.3e-3;
 
     // How to color the particles; see ColorScheme for options
     public static ColorScheme colorscheme = ColorScheme.NATURAL;
-
-    // Shader used to render the particles
-    public Shader starShader;
-
-    // Materials for various types of particle
-    public Material brownDwarfMaterial;
-    public Material redDwarfMaterial;
-    public Material yellowDwarfMaterial;
-    public Material blueDwarfMaterial;
-    public Material blankMaterial;
-
-    // Compute shader used to calculate interactions on GPU
-    public ComputeShader computeShader;
 
     public string computeShaderKernelName;
 
@@ -115,15 +102,23 @@ public class Main : MonoBehaviour
     // store timestamp for last time the main thread yielded, for use by the fps handler
     protected static double lastYieldTime = 0;
 
+    public double lastPauseChange = 0;
+
     private readonly static double targetFps = 30;
 
     private readonly static double targetSecondsPerFrame = 1.0 / targetFps;
 
+    protected bool paused = true;
+
     // Prevent update from trying to call a new physics step if calculations for the previous step are ongoing
     protected volatile bool physicsOngoing = false;
 
+    protected volatile bool isInitializing = false;
+
+    protected bool draggedDuringClick = false;
+
     // All interactions for the current simulation timestep
-    protected PhysicsShaderOutputType[] physicsOutput2 = new PhysicsShaderOutputType[initNumParticles];
+    protected PhysicsShaderOutputType[] physicsOutput2;
 
     /* Stores a maximum of two batches of GPU calculations.
      * Need two arrays here since at any given time we need a non-writable copy of the previous batch and a
@@ -156,10 +151,10 @@ public class Main : MonoBehaviour
     protected static readonly double gStepSize = G * stepSize;
 
     // precomputed mass * position, mass * velocity variables
-    private double[] mx = new double[initNumParticles];
-    private double[] my = new double[initNumParticles];
-    private double[] mvx = new double[initNumParticles];
-    private double[] mvy = new double[initNumParticles];
+    private double[] mx;
+    private double[] my;
+    private double[] mvx;
+    private double[] mvy;
 
     // Dummy particle stored at the end of the particle array to fill it out to a size of 2^n
     // always marked as deleted
@@ -167,16 +162,60 @@ public class Main : MonoBehaviour
 
     protected int selectedParticle = -1;
 
-    public Camera focusCamera;
+    public bool isReady = false;
 
-    public Text particleInformationText;
+    public bool cancelCalculation = false;
+
+
+    public static Camera focusCamera;
+    public static Camera mainCamera;
+
+    public static Text particleInformationText;
+    public static Text systemInformationText;
+    public static Canvas informationCanvas;
+    public static Canvas pauseCanvas;
+    public static Image selectionIcon;
+
+    // Shader used to render the particles
+    public static Shader starShader;
+
+    // Materials for various types of particle
+    public static Material brownDwarfMaterial;
+    public static Material redDwarfMaterial;
+    public static Material yellowDwarfMaterial;
+    public static Material blueDwarfMaterial;
+    public static Material blankMaterial;
+
+    // Compute shader used to calculate interactions on GPU
+    public static ComputeShader computeShader;
 
     // Start is called before the first frame update
-    protected async void Start()
-    {
+    protected async virtual Task Start() {
         Application.runInBackground = true;
-        Random.InitState(0);
-        await initParticles();
+
+        mainCamera = GameObject.Find("Main Camera").GetComponent<Camera>();
+        focusCamera = GameObject.Find("Focus Camera").GetComponent<Camera>();
+
+        particleInformationText = GameObject.Find("Particle Information").GetComponent<Text>();
+        systemInformationText = GameObject.Find("System Information").GetComponent<Text>();
+        informationCanvas = GameObject.Find("Information Canvas").GetComponent<Canvas>();
+        pauseCanvas = GameObject.Find("Pause Menu").GetComponent<Canvas>();
+        selectionIcon = GameObject.Find("Selection Icon").GetComponent<Image>();
+
+        starShader = Resources.Load<Shader>("Shaders/StarSurfaceShader");
+        brownDwarfMaterial = Resources.Load<Material>("Materials/BrownDwarfMaterial");
+        redDwarfMaterial = Resources.Load<Material>("Materials/RedDwarfMaterial");
+        yellowDwarfMaterial = Resources.Load<Material>("Materials/YellowDwarfMaterial");
+        blueDwarfMaterial = Resources.Load<Material>("Materials/BlueDwarfMaterial");
+        blankMaterial = Resources.Load<Material>("Materials/BlankMaterial");
+        computeShader = Resources.Load<ComputeShader>("Shaders/UpdatePhysics");
+
+
+        UnityEngine.Random.InitState(0);
+        placeholderParticle = new Particle("placeholder", -1, 0, 0, 0, 0, 0);
+        placeholderParticle.remove();
+
+        await setPaused(paused);
 
         computeShaderKernelIndex = computeShader.FindKernel(computeShaderKernelName);
         #if DEBUG_GPU
@@ -184,25 +223,57 @@ public class Main : MonoBehaviour
         #endif
         commandBuffer = new CommandBuffer();
         commandBuffer.name = "Physics Compute Renderer Buffer";
-        
 
-        if (gpuParticleGroupSize % numGpuThreads != 0)
-        {
+        if (gpuParticleGroupSize % numGpuThreads != 0) {
             Debug.LogError(string.Format("Particle group size {0} must be a multiple of number of GPU threads {1}", gpuParticleGroupSize, numGpuThreads));
             UnityEditor.EditorApplication.ExitPlaymode();
             await Task.Yield();
         }
-
         await Task.Yield();
-
-
     }
 
-    protected string buildParticleInformation(Particle particle)
-    {
+    // Update is called once per frame
+    protected async void Update() {
+        
+        lastYieldTime = Time.realtimeSinceStartupAsDouble;
+        await handleInput();
+        if (!isReady) {
+            return;
+        }
+        if (!paused) {
+            await updateHUD();
+            if (physicsOngoing) {
+                return;
+            }
+            cancelCalculation = false;
+            physicsOngoing = true;
+            double physicsFrameStart = Time.realtimeSinceStartupAsDouble;
+            for (int i = 0; i < particles.Length; i++) {
+                if (i % numParticleChecksPerYieldCheck == 0) {
+                    await yieldCpuIfFrameTooLong();
+                    if (cancelCalculation) {
+                        physicsOngoing = false;
+                        return;
+                    }
+                }
+                if (!particles[i].removed) {
+                    particles[i].updateNonPhysics(stepSize);
+                }
+            }
+            await gravitate();
+            int numAlive = await updateParticles();
+            updateParticleDisplay();
+            numPhysicsFrames++;
+            double timePassed = Time.realtimeSinceStartupAsDouble - physicsFrameStart;
+            systemInformationText.text = string.Format("{0} particles / {1} capacity\n{2} ms last timestep", numAlive, particles.Length, (timePassed * 1000).ToString("00.00"));
+            physicsOngoing = false;
+        }
+    }
+
+    protected string buildParticleInformation(Particle particle) {
         List<string> rows = new List<string>();
         rows.Add(string.Format("Name: {0}", particle.name));
-        rows.Add(string.Format("Class: {0}", particle.starClass));
+        rows.Add(string.Format("Class: {0}", particle.objectClass));
         rows.Add(string.Format("Mass: {0:E3} kg", particle.mass * 1e27));
         rows.Add(string.Format("Temperature: {0:F3} K", particle.temperature));
         rows.Add(string.Format("Radius: {0:F3} units", particle.radius));
@@ -211,148 +282,291 @@ public class Main : MonoBehaviour
         return string.Join("\n", rows);
     }
 
-    protected void deselectCurrentParticle()
-    {
+    protected void deselectCurrentParticle() {
         particles[selectedParticle].gameObject.layer = 0;
         focusCamera.enabled = false;
+        selectionIcon.GetComponent<Image>().enabled = false;
         particleInformationText.text = "";
+        selectedParticle = -1;
     }
 
-    protected void selectNewParticle(int particleIdx)
-    {
-        Debug.Log(string.Format("Selecting particle {0}", particleIdx));
-        if (selectedParticle != -1 && particleIdx == selectedParticle)
-        {
-            deselectCurrentParticle();
-        }
-        else if (selectedParticle != particleIdx)
-        {
-            selectedParticle = particleIdx;
+    protected void updateParticleDisplay() {
+        if (selectedParticle != -1 && !particles[selectedParticle].removed) {
             particles[selectedParticle].gameObject.layer = 3;
             focusCamera.transform.parent = particles[selectedParticle].gameObject.transform;
             focusCamera.transform.localPosition = new Vector3(0, 0, -10);
-            focusCamera.orthographicSize = 2 * (float)particles[selectedParticle].radius; 
+            focusCamera.orthographicSize = 2 * (float)particles[selectedParticle].radius;
             particleInformationText.text = buildParticleInformation(particles[selectedParticle]);
+
+            float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(3 * particles[selectedParticle].radius * Particle.radiusScale));
+            selectionIcon.transform.localScale = new Vector3(newSize, newSize, newSize);
+        }
+    }
+
+    protected void selectNewParticle(int particleIdx) {
+        // Debug.Log(string.Format("Selecting particle {0}", particleIdx));
+        if (selectedParticle != -1 && particleIdx == selectedParticle) {
+            deselectCurrentParticle();
+        }
+        else if (selectedParticle != particleIdx) {
+            selectedParticle = particleIdx;
+            updateParticleDisplay();
+            
             focusCamera.enabled = true;
+            selectionIcon.GetComponent<Image>().enabled = true;
+            selectionIcon.GetComponent<RectTransform>().position = new Vector3((float)particles[selectedParticle].x, (float)particles[selectedParticle].y);
         }
     }
 
-    protected void handleInput()
-    {
-        float xMovement = Input.GetAxis("Horizontal");
-        float yMovement = Input.GetAxis("Vertical");
-        float xMovementMouse = Input.GetAxis("Mouse X");
-        float yMovementMouse = Input.GetAxis("Mouse Y");
-        float zoomChange = Input.GetAxis("Mouse ScrollWheel");
-        bool isMouseHeldDown = Input.GetMouseButton(0);
-        bool leftClicked = Input.GetMouseButtonDown(0);
+    protected async virtual Task updateHUD() {
+        selectionIcon.GetComponent<RectTransform>().Rotate(new Vector3(0, 0, (float)(-30.0 / targetFps)));
+    }
 
-        Camera camera = GetComponent<Camera>();
-
-        Vector3 movement = isMouseHeldDown ? new Vector3(xMovementMouse, yMovementMouse, 0) :
-            new Vector3(xMovement, yMovement);
-
-        float cameraScale = camera.orthographicSize;
-
-        movement *= camera.orthographicSize;
-
-        gameObject.transform.position -= movement / (float)targetFps;
-
-        zoomChange *= -5;
-
-        if (leftClicked && xMovement == 0 && yMovement == 0) // try to select a particle
-        {
-            Particle p1; float r;
-            float bestDistance = float.PositiveInfinity;
-            int toSelect = -1;
-            for (int i = 0; i < particles.Length; i++)
-            {
-                p1 = particles[i];
-                if (p1.removed)
-                {
-                    continue;
-                }
-                Vector3 particleScreenPos = camera.WorldToScreenPoint(new Vector3((float)p1.x, (float)p1.y, 0));
-                particleScreenPos.z = 0;
-                r = (particleScreenPos - Input.mousePosition).magnitude;
-                if (r < 20 && r < bestDistance)
-                {
-                    toSelect = i;
-                    bestDistance = r;
-                }
-            }
-            if (toSelect != -1)
-            {
-                selectNewParticle(toSelect);
-            }
-        }
-
-        if (zoomChange != 0)
-        {
-            camera.orthographicSize = Mathf.Clamp((float)(camera.orthographicSize * Pow(1.2, zoomChange)), 5, 500);
-        }
-
+    protected async Task handleInput() {
         
+        bool pausePressed = Input.GetAxis("Pause") != 0;
 
+        double currentTime = Time.realtimeSinceStartupAsDouble;
+
+        if (pausePressed && currentTime - lastPauseChange > 1) {
+            lastPauseChange = currentTime;
+            await setPaused(!this.paused);
+        }
+
+        if (!paused) {
+            float xMovement = Input.GetAxis("Horizontal");
+            float yMovement = Input.GetAxis("Vertical");
+            float xMovementMouse = Input.GetAxis("Mouse X");
+            float yMovementMouse = Input.GetAxis("Mouse Y");
+            float zoomChange = Input.GetAxis("Mouse ScrollWheel");
+            bool isMouseHeldDown = Input.GetMouseButton(0);
+            bool leftClickReleased = Input.GetMouseButtonUp(0);
+            if (Input.GetMouseButtonDown(0)) {
+                draggedDuringClick = false;
+            }
+            Vector3 movement = isMouseHeldDown ? new Vector3(xMovementMouse, yMovementMouse, 0) :
+                new Vector3(xMovement, yMovement);
+
+            if (isMouseHeldDown && Abs(xMovementMouse) + Abs(yMovementMouse) > 0.3) {
+                draggedDuringClick = true;
+            }
+
+            float cameraScale = mainCamera.orthographicSize;
+
+            movement *= mainCamera.orthographicSize;
+
+            gameObject.transform.position -= movement / (float)targetFps;
+
+            zoomChange *= -5;
+
+            // only select a particle if simulation is ready, left click was released during this frame, and the screen wasn't moved at all during the click
+            if (isReady && leftClickReleased && !draggedDuringClick) // try to select a particle
+            {
+                Particle p1; float r;
+                float bestDistance = float.PositiveInfinity;
+                int toSelect = -1;
+                for (int i = 0; i < particles.Length; i++) {
+                    p1 = particles[i];
+                    if (p1.removed) {
+                        continue;
+                    }
+                    Vector3 particleScreenPos = mainCamera.WorldToScreenPoint(new Vector3((float)p1.x, (float)p1.y, 0));
+                    particleScreenPos.z = 0;
+                    r = (particleScreenPos - Input.mousePosition).magnitude;
+                    if (r < 20 && r < bestDistance) {
+                        toSelect = i;
+                        bestDistance = r;
+                    }
+                }
+                if (toSelect != -1) {
+                    selectNewParticle(toSelect);
+                }
+            }
+
+            if (zoomChange != 0) {
+                mainCamera.orthographicSize = Mathf.Clamp((float)(mainCamera.orthographicSize * Pow(1.2, zoomChange)), 5, 500);
+                if (selectedParticle != -1 && isReady) {
+                    float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(3 * particles[selectedParticle].radius * Particle.radiusScale));
+
+                    selectionIcon.transform.localScale = new Vector3(newSize, newSize, newSize);
+                }
+            }
+        }
     }
 
-    // Update is called once per frame
-    protected async void Update()
-    {
-        lastYieldTime = Time.realtimeSinceStartupAsDouble;
-        handleInput();
-        if (physicsOngoing)
-        {
+    protected async Task setPaused(bool newPaused) {
+        focusCamera.enabled = !newPaused;
+        informationCanvas.enabled = !newPaused;
+        pauseCanvas.enabled = newPaused;
+        this.paused = newPaused;
+        Debug.Log(string.Format("Now paused? {0}", newPaused));
+        if (!newPaused && !isReady && !isInitializing) {
+            isInitializing = true;
+            await initParticles();
+            await initVariables();
+            isReady = true;
+            isInitializing = false;
+        }
+        
+        
+    }
+
+    public async void saveState() {
+        string filename = "SaveData/" + GameObject.Find("Save InputField Text").GetComponent<Text>().text;
+        bool oldIsReady = isReady;
+        try {
+            if (!isReady) {
+                GameObject.Find("Save Error Text").GetComponent<Text>().text = "Nothing to save; simulation hasn't started yet";
+                return;
+            }
+            isReady = false;
+            while (physicsOngoing) {
+                // Debug.Log("Waiting for current physics frame to end before saving...");
+                await Task.Delay(500);
+            }
+            using (BinaryWriter writer = new BinaryWriter(File.Open(filename, FileMode.Create))) {
+                int numLivingParticles = 0;
+                for (int i = 0; i < particles.Length; i++) {
+                    if (!particles[i].removed) {
+                        numLivingParticles++;
+                    }
+                }
+                // cast to long just to make the alignment prettier :)
+                writer.Write((long)numLivingParticles);
+                writer.Write((long)selectedParticle);
+                for (int i = 0; i < particles.Length; i++) {
+                    if (!particles[i].removed) {
+                        writer.Write(particles[i].x);
+                        writer.Write(particles[i].y);
+                        writer.Write(particles[i].vx);
+                        writer.Write(particles[i].vy);
+                        writer.Write(particles[i].mass);
+                        writer.Write(particles[i].isBlackHole);
+                    }
+                }
+            }
+            GameObject.Find("Save Error Text").GetComponent<Text>().text = "";
+            GameObject.Find("Save InputField Text").GetComponent<Text>().text = "";
+        } catch (Exception e) {
+            GameObject.Find("Save Error Text").GetComponent<Text>().text = e.Message;
+        } finally {
+            isReady = oldIsReady;
+        }
+    }
+
+    public async void loadState() {
+        string filename = "SaveData/" + GameObject.Find("Load InputField Text").GetComponent<Text>().text;
+
+        if (isInitializing) {
+            GameObject.Find("Load Error Text").GetComponent<Text>().text = "Wait for current load to complete first";
             return;
         }
-        physicsOngoing = true;
-        for (int i = 0; i < particles.Length; i++)
-        {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
-                await yieldCpuIfFrameTooLong();
+
+        try {
+            isReady = false;
+            isInitializing = true;
+            selectedParticle = -1;
+            using (BinaryReader reader = new BinaryReader(File.Open(filename, FileMode.Open))) {
+                int numToRead = (int)reader.ReadInt64();
+                int selectedParticleFromFile = (int)reader.ReadInt64();
+                int newParticleArraySize = minParticleBufferSize;
+                while (newParticleArraySize < numToRead) {
+                    newParticleArraySize *= 2;
+                }
+                cancelCalculation = true;
+                isReady = false;
+                if (particles != null) {
+                    for (int i = 0; i < particles.Length; i++) {
+                        if (particles[i] != null && !particles[i].removed) {
+                            particles[i].remove();
+                        }
+                    }
+                }
+                particles = new Particle[newParticleArraySize];
+                double x, y, vx, vy, mass;
+                bool isBlackHole;
+                Debug.Log(string.Format("File stated that we have {0} particles to read", numToRead));
+                for (int i = 0; i < numToRead; i++) {
+                    if (i % numParticleChecksPerYieldCheck == 0) {
+                        await yieldCpuIfFrameTooLong();
+                        GameObject.Find("Load Error Text").GetComponent<Text>().text = "Reading data" + new string('.', (int)(2 * Time.realtimeSinceStartupAsDouble) % 3);
+#if UNITY_EDITOR
+                        if (!UnityEditor.EditorApplication.isPlaying) {
+                            return;
+                        }
+#endif
+                    }
+                    x = reader.ReadDouble();
+                    y = reader.ReadDouble();
+                    vx = reader.ReadDouble();
+                    vy = reader.ReadDouble();
+                    mass = reader.ReadDouble();
+                    isBlackHole = reader.ReadByte() == 1;
+                    
+                    particles[i] = new Particle(string.Format("Particle {0}", i), i, x, y, vx, vy, mass, isBlackHole);
+                    if (i == selectedParticleFromFile) {
+                        selectNewParticle(selectedParticle);
+                    }
+                }
+
+                while (numToRead < newParticleArraySize) {
+                    particles[numToRead++] = placeholderParticle;
+                }
+                await initVariables();
             }
-            if (!particles[i].removed)
-            {
-                particles[i].updateNonPhysics(stepSize);
-            }
+            GameObject.Find("Load Error Text").GetComponent<Text>().text = "";
+            GameObject.Find("Load InputField Text").GetComponent<Text>().text = "";
+            isReady = true;
+        } catch (Exception e) {
+            GameObject.Find("Load Error Text").GetComponent<Text>().text = e.Message;
+            isReady = false;
+        } finally {
+            isInitializing = false;
         }
-        await yieldCpuIfFrameTooLong();
-        await gravitate();
-        await updateParticles();
-        numPhysicsFrames++;
-        physicsOngoing = false;
     }
 
-    protected async Task initParticles()
-    {
-        placeholderParticle = new Particle("placeholder", -1, 0, 0, 0, 0, 0, this);
-        placeholderParticle.remove();
+    protected async virtual Task initVariables() {
+        mx = new double[particles.Length];
+        my = new double[particles.Length];
+        mvx = new double[particles.Length];
+        mvy = new double[particles.Length];
+        physicsOutput2 = new PhysicsShaderOutputType[particles.Length];
+    }
+
+    protected async virtual Task initParticles() {
         particles = new Particle[initNumParticles];
-        particles[0] = new Particle("Star", 0, 0, 0, 0, 0, 4000, this);
+        Debug.Log("Initialized particle array");
+        particles[0] = new Particle("Star", 0, 0, 0, 0, 0, 4000);
         int numInFirstRing = 1024;
         int maxThisRing = numInFirstRing;
         int counter = 0;
         int numRings = 0;
 
-        for (int i = 1; i < initNumParticles; i++)
-        {
-            if (counter == maxThisRing)
-            {
+        for (int i = 1; i < initNumParticles; i++) {
+            if (i % numParticleChecksPerYieldCheck == 0) {
+                await yieldCpuIfFrameTooLong();
+                if (cancelCalculation) {
+                    return;
+                }
+                #if UNITY_EDITOR
+                if (!UnityEditor.EditorApplication.isPlaying) {
+                    return;
+                }
+                #endif  
+            }
+            if (counter == maxThisRing) {
                 counter = 0;
                 numRings++;
                 maxThisRing = (int)(numInFirstRing * Pow(1.004f, numRings));
             }
             int numLeft = initNumParticles - i;
-            if (counter + numLeft < maxThisRing)
-            {
+            if (counter + numLeft < maxThisRing) {
                 maxThisRing = numLeft;
                 #if DEBUG_PHYSICS
                 Debug.Log(string.Format("Final ring contains {0} particles", numLeft));
                 #endif
             }
             double theta = (counter % maxThisRing) * 2 * PI / maxThisRing;
-
 
             // pos = 5 * Random.insideUnitCircle;
             double x = (350 + numRings * 2.0) * Sin(theta);
@@ -364,27 +578,24 @@ public class Main : MonoBehaviour
             double xrot = -y;
             double yrot = x;
 
-            Vector2 rand = 0.002f * Random.insideUnitCircle;
+            Vector2 rand = 0.002f * UnityEngine.Random.insideUnitCircle;
 
             double vx = xrot / 11.3 / rsqr / rsqr / rsqr + rand.x;
             double vy = yrot / 11.3 / rsqr / rsqr / rsqr + rand.y;
 
-            particles[i] = new Particle(string.Format("Particle {0}", i), i, x, y, vx, vy, initialMass, this);
+            particles[i] = new Particle(string.Format("Particle {0}", i), i, x, y, vx, vy, initialMass);
             counter++;
         }
     }
 
-    protected async Task initializeShader(ComputeBuffer shaderInputBuffer, ComputeBuffer shaderOutputBuffer)
-    {
+    protected async Task initializeShader(ComputeBuffer shaderInputBuffer, ComputeBuffer shaderOutputBuffer) {
         Particle p1;
         PhysicsShaderInputType currentInput;
 
         NativeArray<PhysicsShaderInputType> gpuArrayInput = shaderInputBuffer.BeginWrite<PhysicsShaderInputType>(0, particles.Length);
 
-        for (int i = 0; i < particles.Length; i++)
-        {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
+        for (int i = 0; i < particles.Length; i++) {
+            if (i % numParticleChecksPerYieldCheck == 0) {
                 await yieldCpuIfFrameTooLong();
             }
             p1 = particles[i];
@@ -406,10 +617,7 @@ public class Main : MonoBehaviour
         computeShader.SetBuffer(computeShaderKernelIndex, "outputData", shaderOutputBuffer);
     }
 
-    protected virtual async Task gravitate()
-    {
-        
-
+    protected virtual async Task gravitate() {
         int particlesPerThread = gpuParticleGroupSize / numGpuThreads;
         int numGroups = particles.Length / gpuParticleGroupSize;
         bool dataReady = false;
@@ -440,11 +648,9 @@ public class Main : MonoBehaviour
         });
 
         // Exit when maximum index already calculated by GPU is >= minimum index already calculated by cpu
-        while (currentGroup * gpuParticleGroupSize < cpuCalculateIndex)
-        {
+        while (currentGroup * gpuParticleGroupSize < cpuCalculateIndex && !cancelCalculation) {
             // GPU has results for us
-            if (dataReady)
-            {
+            if (dataReady) {
                 #if DEBUG_GPU
                 Debug.Log(string.Format("GPU ready with particles {0} to {1}", currentGroup * gpuParticleGroupSize, (currentGroup + 1) * gpuParticleGroupSize - 1));
                 #endif
@@ -453,11 +659,9 @@ public class Main : MonoBehaviour
                 // redirect writes to the current readable outputArray, while the previous writable array becomes the read array
                 freeCurrentOutputArray = 1 - freeCurrentOutputArray;
                 // If next group is valid, i.e. gpu has not already calculated everything
-                if (currentGroup < numGroups - 1)
-                {
+                if (currentGroup < numGroups - 1) {
                     // Only dispatch next batch to GPU if the CPU has not calculated all the way down to the min index for this group
-                    if ((currentGroup + 1) * gpuParticleGroupSize < cpuCalculateIndex)
-                    {
+                    if ((currentGroup + 1) * gpuParticleGroupSize < cpuCalculateIndex) {
                         #if DEBUG_GPU
                         Debug.Log(string.Format("Dispatching particles {0}-{1} to gpu", (currentGroup + 1) * gpuParticleGroupSize, (currentGroup + 2) * gpuParticleGroupSize - 1));
                         #endif
@@ -478,10 +682,8 @@ public class Main : MonoBehaviour
                 }
                 startIndex = currentGroup * gpuParticleGroupSize;
                 // copy the copy of the current GPU batch to cpu-side memory
-                for (i = 0; i < gpuParticleGroupSize; i++)
-                {
-                    if (i % numParticleChecksPerYieldCheck == 0)
-                    {
+                for (i = 0; i < gpuParticleGroupSize; i++) {
+                    if (i % numParticleChecksPerYieldCheck == 0) {
                         await yieldCpuIfFrameTooLong();
                     }
                     physicsOutput2[i + startIndex] = currentOutputArrays2[1 - freeCurrentOutputArray][i];
@@ -506,14 +708,14 @@ public class Main : MonoBehaviour
                 #if DEBUG_CPU
                 Debug.Log(string.Format("CPU attempting to calculate particles {0}-{1}", cpuCalculateIndex - cpuParticleGroupSize, cpuCalculateIndex - 1));
                 #endif
-                for (u = 0; u < cpuParticleGroupSize; u++)
-                {
-                    if (u % numParticleChecksPerYieldCheck == 0)
-                    {
+                for (u = 0; u < cpuParticleGroupSize; u++) {
+                    if (u % numParticleChecksPerYieldCheck == 0) {
                         await yieldCpuIfFrameTooLong();
+                        if (cancelCalculation) {
+                            break;
+                        }
                     }
-                    if (cpuCalculateIndex < (currentGroup) * gpuParticleGroupSize)
-                    {
+                    if (cpuCalculateIndex < (currentGroup) * gpuParticleGroupSize) {
                         #if DEBUG_CPU
                         Debug.Log(string.Format("CPU standing by because it is on particle {0} and current GPU group runs from {1} to {2}", cpuCalculateIndex, currentGroup * gpuParticleGroupSize, (currentGroup + 1) * gpuParticleGroupSize - 1));
                         #endif
@@ -532,34 +734,29 @@ public class Main : MonoBehaviour
                     cpuOutputPixel.collisions3 = -1;
 
                     updatePhysicsOutput(particles[i], ref cpuOutputPixel);
-                    
+
                     physicsOutput2[i] = cpuOutputPixel;
                 }
             }
             await yieldCpuIfFrameTooLong();
         }
-        if (!request.done)
-        {
+        if (!request.done) {
             request.WaitForCompletion();
         }
         shaderInputBuffer.Release();
         shaderOutputBuffer.Release();
     }
 
-    protected virtual void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType cpuOutputPixel, bool printDebug=false)
-    {
+    protected virtual void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType cpuOutputPixel, bool printDebug=false) {
         double halfStepSize = 0.5 * stepSize;
-        if (!p1.removed)
-        {
+        if (!p1.removed) {
             int j, v = 0;
             double dx, dy, massRatio, r, a;
             Particle p2;
-            for (j = 0; j < particles.Length; j++)
-            {
+            for (j = 0; j < particles.Length; j++) {
 
                 p2 = particles[j];
-                if (p2.removed || p1.id == p2.id)
-                {
+                if (p2.removed || p1.id == p2.id) {
                     continue;
                 }
                 massRatio = p1.mass / p2.mass;
@@ -570,10 +767,8 @@ public class Main : MonoBehaviour
                 cpuOutputPixel.ax += a * dx / r;
                 cpuOutputPixel.ay += a * dy / r;
 
-                if (p1.radius + p2.radius > r && v < 4)
-                {
-                    switch (v)
-                    {
+                if (p1.radius + p2.radius > r && v < 4) {
+                    switch (v) {
                         case 0:
                             cpuOutputPixel.collisions0 = j;
                             break;
@@ -593,8 +788,7 @@ public class Main : MonoBehaviour
         }
     }
 
-    protected void dispatchCompute(int groupNumber)
-    {
+    protected void dispatchCompute(int groupNumber) {
         int startIndex = groupNumber * gpuParticleGroupSize;
         #if DEBUG_GPU
         Debug.Log(string.Format("This dispatch starts at particle {0}", startIndex));
@@ -603,18 +797,15 @@ public class Main : MonoBehaviour
         computeShader.Dispatch(computeShaderKernelIndex, 1, 1, 1);
     }
 
-    public static async Task yieldCpuIfFrameTooLong()
-    {
+    public static async Task yieldCpuIfFrameTooLong() {
         double currentTime = Time.realtimeSinceStartupAsDouble;
-        if (currentTime > lastYieldTime + targetSecondsPerFrame)
-        { // if more than 50 ms have passed since last yield
+        if (currentTime > lastYieldTime + targetSecondsPerFrame) { // if more than 50 ms have passed since last yield
             await Task.Yield();
             lastYieldTime = Time.realtimeSinceStartupAsDouble;
         }
     }
 
-    protected async Task updateParticles()
-    {
+    protected async Task<int> updateParticles() {
         int i, j, k, n = particles.Length;
         Particle p1, p2;
         PhysicsShaderOutputType outputPixel;
@@ -629,17 +820,16 @@ public class Main : MonoBehaviour
         double centerOfMassVX = 0;
         double centerOfMassVY = 0;
         double totalMass = 0;
-        for (i = 0; i < n; i++)
-        {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
+        for (i = 0; i < n; i++) {
+            if (i % numParticleChecksPerYieldCheck == 0) {
                 await yieldCpuIfFrameTooLong();
+                if (cancelCalculation) {
+                    return numAlive;
+                }
             }
-            if (physicsOutput2[i].idx == i)
-            {
+            if (physicsOutput2[i].idx == i) {
                 numWritten++;
-                if (!particles[i].removed)
-                {
+                if (!particles[i].removed) {
                     centerOfMassVX += particles[i].mass * particles[i].vx;
                     centerOfMassVY += particles[i].mass * particles[i].vy;
                     totalMass += particles[i].mass;
@@ -655,33 +845,29 @@ public class Main : MonoBehaviour
 
         #endif
 
-        for (i = 0; i < n; i++)
-        {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
+        for (i = 0; i < n; i++) {
+            if (i % numParticleChecksPerYieldCheck == 0) {
                 await yieldCpuIfFrameTooLong();
+                if (cancelCalculation) {
+                    return numAlive;
+                }
             }
 
-            if (particles[i].removed)
-            {
+            if (particles[i].removed) {
                 continue;
             }
             p1 = particles[i];
             outputPixel = physicsOutput2[i];
-            if (outputPixel.idx != i)
-            {
-                if (canPrintError)
-                {
+            if (outputPixel.idx != i) {
+                if (canPrintError) {
                     Debug.LogError(string.Format("Particle {0} was reported to have id {1} by shader", i, outputPixel.idx));
                     canPrintError = false;
                 }
                 UnityEditor.EditorApplication.ExitPlaymode();
                 await Task.Yield();
             }
-            if (outputPixel.ax != outputPixel.ax || outputPixel.ax == 0)
-            {
-                if (canPrintError)
-                {
+            if (outputPixel.ax != outputPixel.ax || outputPixel.ax == 0) {
+                if (canPrintError) {
                     Debug.LogError(string.Format("Particle {0} has x-acceleration {1}", i, outputPixel.ax));
                     canPrintError = false;
                 }
@@ -696,20 +882,20 @@ public class Main : MonoBehaviour
             mvy[i] = particles[i].mass * particles[i].vy;
         }
         for (i = 0; i < n; i++) {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
+            if (i % numParticleChecksPerYieldCheck == 0) {
                 await yieldCpuIfFrameTooLong();
+                if (cancelCalculation) {
+                    return numAlive;
+                }
             }
             p1 = particles[i];
             outputPixel = physicsOutput2[i];
             if (particles[i].removed) {
                 continue;
             }
-            for (k = 0; k < 4; k++)
-            {
+            for (k = 0; k < 4; k++) {
                 int collisionIndex = -1;
-                switch (k)
-                {
+                switch (k) {
                     case 0:
                         collisionIndex = outputPixel.collisions0;
                         break;
@@ -723,12 +909,10 @@ public class Main : MonoBehaviour
                         collisionIndex = outputPixel.collisions3;
                         break;
                 }
-                if (collisionIndex < -1 || collisionIndex >= particles.Length)
-                {
+                if (collisionIndex < -1 || collisionIndex >= particles.Length) {
                     throw new System.Exception(string.Format("Bad collision index: {0}", collisionIndex));
                 }
-                if (collisionIndex != -1 && !particles[collisionIndex].removed)
-                {
+                if (collisionIndex != -1 && !particles[collisionIndex].removed) {
                     j = collisionIndex;
                     p2 = particles[j];
                     newm = p1.mass + p2.mass;
@@ -745,49 +929,60 @@ public class Main : MonoBehaviour
                     my[i] = p1.mass * p1.y;
                     mvx[i] = p1.mass * p1.vx;
                     mvy[i] = p1.mass * p1.vy;
+                    if (selectedParticle == j) {
+                        selectNewParticle(i);
+                    }
                     p2.remove();
                     await yieldCpuIfFrameTooLong();
+                    if (cancelCalculation) {
+                        return numAlive;
+                    }
                 }
             }
         }
-        for (i = 0; i < particles.Length; i++)
-        {
-            if (i % numParticleChecksPerYieldCheck == 0)
-            {
+        for (i = 0; i < particles.Length; i++) {
+            if (i % numParticleChecksPerYieldCheck == 0) {
                 await yieldCpuIfFrameTooLong();
+                if (cancelCalculation) {
+                    return numAlive;
+                }
             }
-            if (!particles[i].removed)
-            {
+            if (!particles[i].removed) {
                 particles[i].updatePhysics(stepSize);
+                if (i == selectedParticle) {
+                    gameObject.transform.position += (float)stepSize * new Vector3((float)particles[i].vx, (float)particles[i].vy, 0);
+                    selectionIcon.GetComponent<RectTransform>().position = new Vector3((float)particles[selectedParticle].x, (float)particles[selectedParticle].y);
+                }
             }
         }
-        int newParticleArraySize = particles.Length / 2;
+        int newParticleArraySize = 3 * particles.Length / 4;
 
-        if (numAlive <= newParticleArraySize && newParticleArraySize >= minParticleBufferSize)
-        {
+        if (numAlive <= newParticleArraySize && newParticleArraySize >= minParticleBufferSize) {
             reduceParticleCount(newParticleArraySize);
         }
+
+        return numAlive;
     }
 
-    protected virtual void reduceParticleCount(int newParticleArraySize)
-    {
+    protected virtual void reduceParticleCount(int newParticleArraySize) {
         Particle[] newParticles = new Particle[newParticleArraySize];
         int idx = 0;
-        for (int i = 0; i < particles.Length; i++)
-        {
-            if (!particles[i].removed)
-            {
+        for (int i = 0; i < particles.Length; i++) {
+            if (!particles[i].removed) {
                 newParticles[idx] = particles[i];
                 particles[i].id = idx;
+                if (selectedParticle == i) {
+                    selectedParticle = idx;
+                }
                 idx++;
             }
         }
-        while (idx < newParticleArraySize)
-        {
+        while (idx < newParticleArraySize) {
             newParticles[idx++] = placeholderParticle;
         }
 
         particles = newParticles;
+        Debug.Log("Reinitialized particle array to smaller size");
         physicsOutput2 = new PhysicsShaderOutputType[particles.Length];
         mx = new double[particles.Length];
         my = new double[particles.Length];
@@ -795,8 +990,7 @@ public class Main : MonoBehaviour
         mvy = new double[particles.Length];
     }
 
-    public void addParticle(Particle p)
-    {
+    public void addParticle(Particle p) {
         
     }
 }
