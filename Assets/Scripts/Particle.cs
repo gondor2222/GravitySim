@@ -12,10 +12,9 @@ public class Particle
     public static readonly double L_Sun = 3.83E26;
     public static readonly double r_Jupiter = 6.9173E7;
     public static readonly double SB = 5.670373E-8;
-    public static readonly double radiusScale = 10f; // display objects larger than they actually are by this factor
+    public static bool exaggerateSmallParticles = true; // display objects larger than they actually are by this factor
 
     public volatile GameObject gameObject;
-    private Material material;
     private volatile Transform transform;
 
     public string name;
@@ -40,8 +39,13 @@ public class Particle
     public double lastRenderX = double.PositiveInfinity;
     public double lastRenderY = double.PositiveInfinity;
     private static double lastRenderUpdateThreshold = 1e-4f;
+
+    public Particle(string name) {
+        this.name = name;
+        this.removed = true;
+    }
     
-    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, bool isBlackHole = false)
+    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, Mesh meshToUse, bool isBlackHole = false)
     {
         this.name = name;
         this.id = id;
@@ -51,16 +55,18 @@ public class Particle
         this.vy = vy;
         this.mass = mass;
 
-        this.gameObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        Object.DestroyImmediate(this.gameObject.GetComponent<SphereCollider>());
-        this.gameObject.name = name;
+        this.gameObject = new GameObject(name);
+        this.gameObject.AddComponent<MeshFilter>();
+        this.gameObject.GetComponent<MeshFilter>().mesh = meshToUse;
+        this.gameObject.AddComponent<MeshRenderer>();
         this.gameObject.transform.position = new Vector2((float)x,(float)y);
         this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.yellowDwarfMaterial;
-        this.material = this.gameObject.GetComponent<MeshRenderer>().sharedMaterial;
 
         this.transform = this.gameObject.transform;
         this.isBlackHole = isBlackHole;
         this.lifeLeft = 1;
+
+        updateNonPhysics(0);
     }
 
     private static double[] starClassMinimumTemperatures = {
@@ -102,10 +108,15 @@ public class Particle
             updateTemperature();
             updateColor();
             updateStarClass();
-            updateGameObject(oldStarClass != objectClass);
+            updateGameObject(!objectClass.Equals(oldStarClass));
             massDirty = false;
-            float diameter = (float)(2 * radiusScale * radius * Main.displayScale);
-            transform.localScale = new Vector3(diameter, diameter, diameter);
+            double diameter = 2 * radius;
+
+            if (exaggerateSmallParticles) {
+                diameter = Sqrt(2 + diameter*diameter);
+            }
+
+            transform.localScale = (float)diameter * new Vector3(1, 1, 1);
         }
         updateLife(stepSize);
         
@@ -137,37 +148,29 @@ public class Particle
                     case "O-class Star":
                     case "B-class Star":
                     case "A-class Star":
-                        // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.blueDwarfMaterial;
                         break;
                     case "F-class Star":
                     case "G-class Star":
                     case "K-class Star":
-                        // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.yellowDwarfMaterial;
                         break;
                     case "M-class Star":
-                        // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.redDwarfMaterial;
                         break;
                     case "L-class Brown Dwarf":
                     case "T-class Brown Dwarf":
                     case "Y-class Brown Dwarf":
-                        // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.brownDwarfMaterial;
                         break;
-                    
                     case "Gas Planet":
-
-                        break;
                     case "Rocky Planet":
-
-                        break;
                     case "Black Hole":
-
-                        break;
                     default:
-                        // newBlock.SetTexture("Texture", main.yellowDwarfMaterial.mainTexture);
+                        gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.blankMaterial;
                         break;
                 }
             }
-
             gameObject.GetComponent<MeshRenderer>().SetPropertyBlock(newBlock);
         }
     }
@@ -239,19 +242,19 @@ public class Particle
         // But we don't model that here :)
         else if (this.mass > 159) // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
         {
-            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.43;
+            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.40;
         }
         else if (this.mass > 0.778) // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
         {
-            this.radius = 3.36 * Pow(this.mass, -0.04) * 0.43; // 3.01 at upper end before scaling
+            this.radius = 3.36 * Pow(this.mass, -0.04) * 0.40; // 3.01 at upper end before scaling
         }
         else if (this.mass > 0.012)  // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
         {
-            this.radius = 3.94 * Pow(mass, 0.59) * 0.43; // 3.40 at upper end before scaling
+            this.radius = 3.94 * Pow(mass, 0.59) * 0.40; // 3.40 at upper end before scaling
         }
         else // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression
         {
-            this.radius = 1.0 * Pow(mass, 0.28) * 0.43; // 0.290 at upper end before scaling
+            this.radius = 1.0 * Pow(mass, 0.28) * 0.40; // 0.290 at upper end before scaling
         }
         // below about 1e-6 units, objects begin to deviate significantly from round, and mean radius can't be predicted from mass even with known composition
         // but we don't model that here either

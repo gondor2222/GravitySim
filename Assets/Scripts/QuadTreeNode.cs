@@ -16,6 +16,8 @@ public class QuadTreeNode
     public double totalMass = 0; // total mass contained within the node;
     public double centerOfMassX = 0; // center of mass of the node along the x axis
     public double centerOfMassY = 0; // center of mass of the node along the y axis
+    public double vx; // velocity of center of mass along x axis
+    public double vy; // velocity of center of mass along y axis
     public double width = 0;
     public readonly int[] children = new int[4]; // { indices for upper-left, upper-right, lower-left, lower-right
 
@@ -25,13 +27,13 @@ public class QuadTreeNode
 
     public static QuadTreeNode placeholder = new QuadTreeNode();
 
-    private static async Task<int> fillNodeArray(Particle[] allParticles, List<int> particleIdxs, QuadTreeNode[] array, int addIndex, int depth)
+    private static async Task<int> fillNodeArray(Particle[] allParticles, int[] particleIdxs, int count, QuadTreeNode[] array, int addIndex, int depth)
     {
         if (addIndex % Main.numParticleChecksPerYieldCheck == 0)
         {
             await Main.yieldCpuIfFrameTooLong();
         }
-        if (particleIdxs.Count == 0)
+        if (count == 0)
         {
             throw new System.Exception("Empty node constructed");
         }
@@ -39,7 +41,7 @@ public class QuadTreeNode
         {
             array[addIndex] = new QuadTreeNode();
         }
-        if (particleIdxs.Count == 1)
+        if (count == 1)
         {  // leaf node
             int particleIdx = particleIdxs[0];
             array[addIndex].particleId = allParticles[particleIdx].id;
@@ -47,6 +49,8 @@ public class QuadTreeNode
             array[addIndex].totalMass = allParticles[particleIdx].mass;
             array[addIndex].centerOfMassX = allParticles[particleIdx].x;
             array[addIndex].centerOfMassY = allParticles[particleIdx].y;
+            array[addIndex].vx = allParticles[particleIdx].vx;
+            array[addIndex].vy = allParticles[particleIdx].vy;
             for (int i = 0; i < 4; i++)
             {
                 array[addIndex].children[i] = -1;
@@ -55,16 +59,18 @@ public class QuadTreeNode
         }
         else
         { // internal node
-            List<int>[] subTreeParticles = {
-                new List<int>(particleIdxs.Count / 2 + 1),
-                new List<int>(particleIdxs.Count / 2 + 1),
-                new List<int>(particleIdxs.Count / 2 + 1),
-                new List<int>(particleIdxs.Count / 2 + 1)
+            int[][] subTreeParticles = {
+                new int[count - 1],
+                new int[count - 1],
+                new int[count - 1],
+                new int[count - 1]
             };
             array[addIndex].centerOfMassX = 0;
             array[addIndex].centerOfMassY = 0;
             array[addIndex].totalMass = 0;
             array[addIndex].particleId = -1;
+            array[addIndex].vx = 0;
+            array[addIndex].vy = 0;
             for (int i = 0; i < 4; i++)
             {
                 array[addIndex].children[i] = -1;
@@ -75,7 +81,7 @@ public class QuadTreeNode
             double minY = double.PositiveInfinity;
             double maxY = double.NegativeInfinity;
             Particle p1;
-            for (int i = 0; i < particleIdxs.Count; i++)
+            for (int i = 0; i < count; i++)
             { // calculate bounds of this node 
                 p1 = allParticles[particleIdxs[i]];
                 minX = p1.x < minX ? p1.x : minX;
@@ -87,13 +93,17 @@ public class QuadTreeNode
             double centerY = (maxY + minY) / 2;
             array[addIndex].width = Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
             int idx;
-            for (int i = 0; i < particleIdxs.Count; i++)
+            int[] subcounts = { 0, 0, 0, 0 };
+            int sublistIdx;
+            for (int i = 0; i < count; i++)
             { // sort particles into sublists by quadrant
                 idx = particleIdxs[i];
                 p1 = allParticles[idx];
                 int xChildIndex = p1.x > centerX ? 1 : 0;
                 int yChildIndex = p1.y > centerY ? 1 : 0;
-                subTreeParticles[xChildIndex * 2 + yChildIndex].Add(idx);
+                sublistIdx = xChildIndex * 2 + yChildIndex;
+                subTreeParticles[sublistIdx][subcounts[sublistIdx]] = idx;
+                subcounts[sublistIdx]++;
                 if (i % Main.numParticleChecksPerYieldCheck == 0)
                 {
                     await Main.yieldCpuIfFrameTooLong();
@@ -106,19 +116,22 @@ public class QuadTreeNode
             { // initialize subtrees
                 for (int j = 0; j < 2; j++)
                 {
-                    if (subTreeParticles[2 * i + j].Count > 0)
-                    {
-                        lastChildAdded = await fillNodeArray(allParticles, subTreeParticles[2 * i + j], array, firstFreeIdx, depth + 1);
+                    if (subcounts[2 * i + j] > 0) {
+                        lastChildAdded = await fillNodeArray(allParticles, subTreeParticles[2 * i + j], subcounts[2 * i + j], array, firstFreeIdx, depth + 1);
                         array[addIndex].children[childIdx++] = firstFreeIdx;
                         array[addIndex].totalMass = array[addIndex].totalMass + array[firstFreeIdx].totalMass;
                         array[addIndex].centerOfMassX += array[firstFreeIdx].totalMass * array[firstFreeIdx].centerOfMassX; // weighted sum, will be normalized by total mass
                         array[addIndex].centerOfMassY += array[firstFreeIdx].totalMass * array[firstFreeIdx].centerOfMassY;
+                        array[addIndex].vx += array[firstFreeIdx].totalMass * array[firstFreeIdx].vx;
+                        array[addIndex].vy += array[firstFreeIdx].totalMass * array[firstFreeIdx].vy;
                         firstFreeIdx = lastChildAdded;
                     }
                 }
             }
             array[addIndex].centerOfMassX /= array[addIndex].totalMass; // normalize centerOfMass by total mass
             array[addIndex].centerOfMassY /= array[addIndex].totalMass;
+            array[addIndex].vx /= array[addIndex].totalMass;
+            array[addIndex].vy /= array[addIndex].totalMass;
             return firstFreeIdx;
         }
     }
@@ -136,15 +149,17 @@ public class QuadTreeNode
 
     public static async Task initializeNodeArray(QuadTreeNode[] array, Particle[] particles)
     {
-        List<int> particleIds = new List<int>();
+        int[] particleIds = new int[particles.Length];
+        int idx = 0;
         for (int i = 0; i < particles.Length; i++)
         {
             if (!particles[i].removed)
             {
-                particleIds.Add(i);
+                particleIds[idx++] = i;
             }
         }
-        int addIndex = await fillNodeArray(particles, particleIds, array, 0, 0);
+
+        int addIndex = await fillNodeArray(particles, particleIds, idx, array, 0, 0);
         await Main.yieldCpuIfFrameTooLong();
         while (addIndex < array.Length)
         {

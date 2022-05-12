@@ -14,8 +14,10 @@ public struct PhysicsShaderQuadTreeNode
     public double totalMass; // total mass contained within the node;
     public double centerOfMassX; // center of mass of the node along the x axis
     public double centerOfMassY; // center of mass of the node along the y axis
+    public double vx; // velocity of center of mass along x axis
+    public double vy; // velocity of center of mass along y axis
     public double width;
-}; // size 48 (actually 44 but will be padded to multiple of 8)
+}; // size 64 (actually 60 but will be padded to multiple of 8)
 
 public class MainBarnesHut : Main
 {
@@ -32,6 +34,7 @@ public class MainBarnesHut : Main
     protected override void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType outputPixel, bool printDebug=false)
     {
         double dx, dy, r, a, distanceToNode;
+        double halfStepSize = 0.5 * Main.stepSize;
         int collisionIndex = 0, nodeToCheck = 0;
         QuadTreeNode node;
         while (nodeToCheck != -1)
@@ -78,8 +81,8 @@ public class MainBarnesHut : Main
                 distanceToNode = Sqrt((p1.x - node.centerOfMassX) * (p1.x - node.centerOfMassX) + (p1.y - node.centerOfMassY) * (p1.y - node.centerOfMassY));
                 if (node.width / distanceToNode < barnesHutThreshold) // treat as leaf, i.e. skip over children
                 {
-                    dx = node.centerOfMassX - p1.x;
-                    dy = node.centerOfMassY - p1.y;
+                    dx = node.centerOfMassX - p1.x + halfStepSize * (node.vx - p1.vx);
+                    dy = node.centerOfMassY - p1.y + halfStepSize * (node.vy - p1.vy);
                     r = Sqrt(dx * dx + dy * dy);
                     a = gStepSize * node.totalMass / (r * r);
                     outputPixel.ax += a * dx / r;
@@ -117,6 +120,8 @@ public class MainBarnesHut : Main
             node.totalMass = nodeList[i].totalMass;
             node.centerOfMassX = nodeList[i].centerOfMassX;
             node.centerOfMassY = nodeList[i].centerOfMassY;
+            node.vx = nodeList[i].vx;
+            node.vy = nodeList[i].vy;
             node.width = nodeList[i].width;
             nodeListInput[i] = node;
         }
@@ -136,7 +141,7 @@ public class MainBarnesHut : Main
     {
         await QuadTreeNode.initializeNodeArray(nodeList, particles);
 
-        ComputeBuffer nodeListBuffer = new ComputeBuffer(nodeList.Length, 48, ComputeBufferType.Default, ComputeBufferMode.SubUpdates);
+        ComputeBuffer nodeListBuffer = new ComputeBuffer(nodeList.Length, 64, ComputeBufferType.Default, ComputeBufferMode.SubUpdates);
         await initializeShaderBarnesHut(nodeListBuffer);
         await base.gravitate();
         nodeListBuffer.Release();

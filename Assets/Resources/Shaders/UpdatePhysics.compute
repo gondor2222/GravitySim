@@ -17,6 +17,7 @@ struct InputTypeQuadTreeNode {
     int nextNode;
     double totalMass;
     double2 centerOfMass;
+    double2 v;
     double width;
 };
 
@@ -137,7 +138,7 @@ void Compute(uint3 id : SV_DispatchThreadID)
                 }
                 // instead of using current particle position, use particle position in the middle
                 // of the step using current velocity
-                dpos = p2.pos + halfStepSize * p2.v - p1.pos - halfStepSize * p1.v;
+                dpos = p2.pos - p1.pos + halfStepSize * (p2.v - p1.v);
 
                 /* cast to float to silence compiler warnings. Yes, we lose precision here :(
                 * Most GPUs unfortunately still don't support double-compatible sqrt, and the performance
@@ -171,6 +172,7 @@ void ComputeBarnesHut(uint3 id : SV_DispatchThreadID) {
     int4 collisions = int4(-1, -1, -1, -1);
 
     double gStepSize = g * stepSize;
+    double halfStepSize = 0.5 * stepSize;
     double r, distanceToNode;
     double2 dpos;
 
@@ -197,7 +199,7 @@ void ComputeBarnesHut(uint3 id : SV_DispatchThreadID) {
             node = inputDataQuadTreeNodes[nodeToCheck];
             if (node.child == -1) { // leaf node
                 if (node.particleId != i) { // ignore self-interaction
-                    dpos = node.centerOfMass - p1.pos;
+                    dpos = node.centerOfMass - p1.pos + halfStepSize * (node.v - p1.v);
                     r = length((float2)dpos);
 
                     // save collision ID if collision detected
@@ -216,7 +218,7 @@ void ComputeBarnesHut(uint3 id : SV_DispatchThreadID) {
             else { // internal node
                 distanceToNode = length((float2)(node.centerOfMass - p1.pos));
                 if (node.width / distanceToNode < barnesHutThreshold) { // treat as leaf, skip over children
-                    dpos = node.centerOfMass - p1.pos;
+                    dpos = node.centerOfMass - p1.pos + halfStepSize * (node.v - p1.v);
                     r = length((float2)dpos);
 
                     output.a += gStepSize * node.totalMass * dpos / ( r * r * r);

@@ -43,24 +43,14 @@ consumption and slightly speed up the O(N) loops over it.
 
 ## Package Structure ##
 
-Only the Assets folder is related to the simulation itself. The other folders contain assets used by Unity to set up and run
+Only the Assets folder contains simulation logic. The other folders contain assets used by Unity to set up and run
 the project.
 
-### Materials ###
+### Resources/Materials ###
 The `Materials` folder contains textures and materials used to display various star surface textures
 This folder is currently a WIP and the simulation uses the yellow dwarf texture for all objects
 
-### Scenes ###
-
-There is currently only one scene: The main scene, which does all simulation and visualizes the results
-
-### Scripts ###
-
-Contains CPU code to be executed by the simulation.
-See documentation in the scripts themselves for more information. The Main and MainBarnesHut scripts are the Monobehaviours
-which handle the main simulation logic, for the naive and Barnes-Hut methods respectively.
-
-### Shaders ###
+### Resources/Shaders ###
 
 #### StarSurfaceShader ####
 
@@ -72,9 +62,20 @@ according to black-body emission temperature.
 Contains two GPU kernels: one for simulating particle accelerations according to the naive method, and another for simulating
 according to the Barnes-Hut method.
 
+### Scenes ###
+
+There is currently only one scene: The main scene, which does all simulation and visualizes the results
+
+### Scripts ###
+
+Contains CPU code to be executed by the simulation.
+See documentation in the scripts themselves for more information. The Main and MainBarnesHut scripts are the Monobehaviours
+which handle the main simulation logic, for the naive and Barnes-Hut methods respectively.
+
+
 ## Setup instructions ##
 
-Clone the repository to a folder of your choice and then import the folder as a project in Unity
+Clone the repository to a folder of your choice and then import the folder as a project in Unity. After that simply run the project from the editor.
 
 ## Usage ##
 

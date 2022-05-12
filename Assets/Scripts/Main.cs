@@ -7,8 +7,9 @@ using System.Threading.Tasks;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Rendering;
-using Unity.Collections;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
+using Unity.Collections;
 using static System.Math;
 
 // Information about particles to be used by the GPU
@@ -39,19 +40,25 @@ public struct PhysicsShaderOutputType
     public int collisions3;
 }; // size 40
 
+public enum InitMode {
+    CLOUD,
+    DISK,
+    SYSTEM
+};
+
 /*
  * Base MonoBehaviour; if attached as run as is, will do calculations using the naive method
  * 
  * Some large data structures only required in specific methods with sizes that change infrequently are
  * instead assigned here to avoid the performance penalty of frequent memory allocations of constant size.
  */
-public class Main : MonoBehaviour
-{
+public class Main : MonoBehaviour {
 
     // particle array
     protected volatile Particle[] particles;
     // initial number of particles and initial capacity of particle array
-    public static int initNumParticles = 1024 * 512;
+    public static int initNumParticles = 1024 * 512 / 4;
+    public static InitMode defaultInitMode = InitMode.DISK;
     // smallest length of particle array, i.e. guaranteed minimum capacity for particle array at all times
     public static int minParticleBufferSize = 512;
 
@@ -81,9 +88,11 @@ public class Main : MonoBehaviour
     public static double marsMass = 0.642e-3;
 
     public static double moonMass = 0.0735e-3;
-    
+
     // initial mass of particles (also 1e27 kg units)
     public static double initialMass = 0.3e-3;
+
+    public static long simulationStartTime;
 
     // How to color the particles; see ColorScheme for options
     public static ColorScheme colorscheme = ColorScheme.NATURAL;
@@ -97,12 +106,14 @@ public class Main : MonoBehaviour
     protected CommandBuffer commandBuffer;
 
     // Number of simulation timesteps completed
-    protected int numPhysicsFrames = 0;
+    protected long numPhysicsFrames = 0;
+
+    protected double totalSimulationTime = 0;
 
     // store timestamp for last time the main thread yielded, for use by the fps handler
     protected static double lastYieldTime = 0;
 
-    public double lastPauseChange = 0;
+    public double lastMenuChange = 0;
 
     private readonly static double targetFps = 30;
 
@@ -135,14 +146,11 @@ public class Main : MonoBehaviour
         "gStepSize invalid", "particle i has invalid mass",
         "particle j has invalid mass", "distance was 0" };
 
-    // multiplier for displayed object sizes
-    public static double displayScale = 1.0f;
-
     // multiplier for simulation timespeed; multiplier for both velocity increments to position and
     // acceleration increments to velocity.
     // note that this is baked into the acceleration calculations and therefore not used directly
     // when updating velocities
-    protected static readonly double stepSize = 50.0f;
+    protected static readonly double stepSize = 25.0f;
 
     // gravitational constant
     public static readonly double G = 1.992e-6f;
@@ -173,8 +181,11 @@ public class Main : MonoBehaviour
     public static Text particleInformationText;
     public static Text systemInformationText;
     public static Canvas informationCanvas;
-    public static Canvas pauseCanvas;
+    public static Canvas mainMenuCanvas;
     public static Image selectionIcon;
+    public static Text pauseButtonText;
+    public static EventSystem eventSystem;
+    public static Button initButton;
 
     // Shader used to render the particles
     public static Shader starShader;
@@ -189,6 +200,8 @@ public class Main : MonoBehaviour
     // Compute shader used to calculate interactions on GPU
     public static ComputeShader computeShader;
 
+    public static Mesh sphereMesh;
+
     // Start is called before the first frame update
     protected async virtual Task Start() {
         Application.runInBackground = true;
@@ -199,8 +212,11 @@ public class Main : MonoBehaviour
         particleInformationText = GameObject.Find("Particle Information").GetComponent<Text>();
         systemInformationText = GameObject.Find("System Information").GetComponent<Text>();
         informationCanvas = GameObject.Find("Information Canvas").GetComponent<Canvas>();
-        pauseCanvas = GameObject.Find("Pause Menu").GetComponent<Canvas>();
+        mainMenuCanvas = GameObject.Find("Main Menu").GetComponent<Canvas>();
         selectionIcon = GameObject.Find("Selection Icon").GetComponent<Image>();
+        pauseButtonText = GameObject.Find("Pause Button Text").GetComponent<Text>();
+        eventSystem = GameObject.Find("EventSystem").GetComponent<EventSystem>();
+        initButton = GameObject.Find("Initialize Button").GetComponent<Button>();
 
         starShader = Resources.Load<Shader>("Shaders/StarSurfaceShader");
         brownDwarfMaterial = Resources.Load<Material>("Materials/BrownDwarfMaterial");
@@ -212,10 +228,9 @@ public class Main : MonoBehaviour
 
 
         UnityEngine.Random.InitState(0);
-        placeholderParticle = new Particle("placeholder", -1, 0, 0, 0, 0, 0);
-        placeholderParticle.remove();
-
-        await setPaused(paused);
+        placeholderParticle = new Particle("placeholder");
+        setPaused(paused);
+        await toggleMainMenu(true);
 
         computeShaderKernelIndex = computeShader.FindKernel(computeShaderKernelName);
         #if DEBUG_GPU
@@ -224,11 +239,19 @@ public class Main : MonoBehaviour
         commandBuffer = new CommandBuffer();
         commandBuffer.name = "Physics Compute Renderer Buffer";
 
+#if UNITY_EDITOR
         if (gpuParticleGroupSize % numGpuThreads != 0) {
             Debug.LogError(string.Format("Particle group size {0} must be a multiple of number of GPU threads {1}", gpuParticleGroupSize, numGpuThreads));
             UnityEditor.EditorApplication.ExitPlaymode();
             await Task.Yield();
         }
+#endif
+
+        GameObject sphereObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        sphereMesh = sphereObject.GetComponent<MeshFilter>().mesh;
+
+        GameObject.DestroyImmediate(sphereObject);
+
         await Task.Yield();
     }
 
@@ -265,7 +288,14 @@ public class Main : MonoBehaviour
             updateParticleDisplay();
             numPhysicsFrames++;
             double timePassed = Time.realtimeSinceStartupAsDouble - physicsFrameStart;
-            systemInformationText.text = string.Format("{0} particles / {1} capacity\n{2} ms last timestep", numAlive, particles.Length, (timePassed * 1000).ToString("00.00"));
+            List<String> globalInformationRows = new List<string>();
+            globalInformationRows.Add(string.Format("{0} particles / {1} capacity", numAlive, particles.Length));
+            globalInformationRows.Add(string.Format("Simulation started: {0}", new DateTime(simulationStartTime).ToString()));
+            globalInformationRows.Add(string.Format("Total simulation time: {0} s", totalSimulationTime.ToString(".00")));
+            globalInformationRows.Add(string.Format("Number of timesteps: {0}", numPhysicsFrames));
+            globalInformationRows.Add(string.Format("Last timestep: {0} ms", (timePassed * 1000).ToString("00.00")));
+            totalSimulationTime += timePassed;
+            systemInformationText.text = string.Join("\n", globalInformationRows);
             physicsOngoing = false;
         }
     }
@@ -276,7 +306,7 @@ public class Main : MonoBehaviour
         rows.Add(string.Format("Class: {0}", particle.objectClass));
         rows.Add(string.Format("Mass: {0:E3} kg", particle.mass * 1e27));
         rows.Add(string.Format("Temperature: {0:F3} K", particle.temperature));
-        rows.Add(string.Format("Radius: {0:F3} units", particle.radius));
+        rows.Add(string.Format("Radius: {0:E3} m", particle.radius * Particle.r_Jupiter));
         rows.Add(string.Format("ID: {0}", particle.id));
 
         return string.Join("\n", rows);
@@ -295,10 +325,10 @@ public class Main : MonoBehaviour
             particles[selectedParticle].gameObject.layer = 3;
             focusCamera.transform.parent = particles[selectedParticle].gameObject.transform;
             focusCamera.transform.localPosition = new Vector3(0, 0, -10);
-            focusCamera.orthographicSize = 2 * (float)particles[selectedParticle].radius;
+            focusCamera.orthographicSize =(float)particles[selectedParticle].gameObject.transform.localScale.x;
             particleInformationText.text = buildParticleInformation(particles[selectedParticle]);
 
-            float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(3 * particles[selectedParticle].radius * Particle.radiusScale));
+            float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(2 * particles[selectedParticle].gameObject.transform.localScale.x));
             selectionIcon.transform.localScale = new Vector3(newSize, newSize, newSize);
         }
     }
@@ -324,16 +354,22 @@ public class Main : MonoBehaviour
 
     protected async Task handleInput() {
         
+        bool menuPressed = Input.GetAxis("Menu") != 0;
+
         bool pausePressed = Input.GetAxis("Pause") != 0;
 
         double currentTime = Time.realtimeSinceStartupAsDouble;
 
-        if (pausePressed && currentTime - lastPauseChange > 1) {
-            lastPauseChange = currentTime;
-            await setPaused(!this.paused);
+        if (menuPressed && currentTime - lastMenuChange > 1) {
+            lastMenuChange = currentTime;
+            toggleMainMenu(!mainMenuCanvas.enabled);
         }
 
-        if (!paused) {
+        if (pausePressed) {
+            onPausePressed();
+        }
+
+        if (!mainMenuCanvas.enabled) {
             float xMovement = Input.GetAxis("Horizontal");
             float yMovement = Input.GetAxis("Vertical");
             float xMovementMouse = Input.GetAxis("Mouse X");
@@ -341,6 +377,19 @@ public class Main : MonoBehaviour
             float zoomChange = Input.GetAxis("Mouse ScrollWheel");
             bool isMouseHeldDown = Input.GetMouseButton(0);
             bool leftClickReleased = Input.GetMouseButtonUp(0);
+
+            PointerEventData eventData = new PointerEventData(eventSystem);
+            //Set the Pointer Event Position to that of the mouse position
+            eventData.position = Input.mousePosition;
+
+            List<RaycastResult> infoPanelRaycastTargets = new List<RaycastResult>();
+
+            informationCanvas.GetComponent<GraphicRaycaster>().Raycast(eventData, infoPanelRaycastTargets);
+
+            if (infoPanelRaycastTargets.Count > 0) {
+                return;
+            }
+
             if (Input.GetMouseButtonDown(0)) {
                 draggedDuringClick = false;
             }
@@ -362,7 +411,7 @@ public class Main : MonoBehaviour
             // only select a particle if simulation is ready, left click was released during this frame, and the screen wasn't moved at all during the click
             if (isReady && leftClickReleased && !draggedDuringClick) // try to select a particle
             {
-                Particle p1; float r;
+                Particle p1; float rScreen, rWorld;
                 float bestDistance = float.PositiveInfinity;
                 int toSelect = -1;
                 for (int i = 0; i < particles.Length; i++) {
@@ -372,10 +421,13 @@ public class Main : MonoBehaviour
                     }
                     Vector3 particleScreenPos = mainCamera.WorldToScreenPoint(new Vector3((float)p1.x, (float)p1.y, 0));
                     particleScreenPos.z = 0;
-                    r = (particleScreenPos - Input.mousePosition).magnitude;
-                    if (r < 20 && r < bestDistance) {
+                    Vector3 mousePosInWorld = mainCamera.ScreenToWorldPoint(Input.mousePosition);
+                    mousePosInWorld.z = 0;
+                    rScreen = (particleScreenPos - Input.mousePosition).magnitude;
+                    rWorld = (new Vector3((float)p1.x, (float)p1.y) - mousePosInWorld).magnitude;
+                    if ((rScreen < 20 || rWorld < p1.gameObject.transform.localScale.x / 2) && rScreen < bestDistance) {
                         toSelect = i;
-                        bestDistance = r;
+                        bestDistance = rScreen;
                     }
                 }
                 if (toSelect != -1) {
@@ -384,9 +436,9 @@ public class Main : MonoBehaviour
             }
 
             if (zoomChange != 0) {
-                mainCamera.orthographicSize = Mathf.Clamp((float)(mainCamera.orthographicSize * Pow(1.2, zoomChange)), 5, 500);
+                mainCamera.orthographicSize = Mathf.Clamp((float)(mainCamera.orthographicSize * Pow(1.2, zoomChange)), 5, 2000);
                 if (selectedParticle != -1 && isReady) {
-                    float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(3 * particles[selectedParticle].radius * Particle.radiusScale));
+                    float newSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(2 * particles[selectedParticle].gameObject.transform.localScale.x));
 
                     selectionIcon.transform.localScale = new Vector3(newSize, newSize, newSize);
                 }
@@ -394,21 +446,19 @@ public class Main : MonoBehaviour
         }
     }
 
-    protected async Task setPaused(bool newPaused) {
-        focusCamera.enabled = !newPaused;
-        informationCanvas.enabled = !newPaused;
-        pauseCanvas.enabled = newPaused;
-        this.paused = newPaused;
-        Debug.Log(string.Format("Now paused? {0}", newPaused));
-        if (!newPaused && !isReady && !isInitializing) {
-            isInitializing = true;
-            await initParticles();
-            await initVariables();
-            isReady = true;
-            isInitializing = false;
-        }
-        
-        
+    protected async Task toggleMainMenu(bool show) {
+        mainMenuCanvas.enabled = show;
+        focusCamera.enabled = !show;
+        informationCanvas.enabled = !show;
+    }
+
+    public async void doInit() {
+        initButton.interactable = false;
+        isInitializing = true;
+        await initParticles(defaultInitMode);
+        await initVariables();
+        isReady = true;
+        isInitializing = false;
     }
 
     public async void saveState() {
@@ -434,6 +484,9 @@ public class Main : MonoBehaviour
                 // cast to long just to make the alignment prettier :)
                 writer.Write((long)numLivingParticles);
                 writer.Write((long)selectedParticle);
+                writer.Write(numPhysicsFrames);
+                writer.Write(simulationStartTime);
+                writer.Write(totalSimulationTime);
                 for (int i = 0; i < particles.Length; i++) {
                     if (!particles[i].removed) {
                         writer.Write(particles[i].x);
@@ -469,6 +522,9 @@ public class Main : MonoBehaviour
             using (BinaryReader reader = new BinaryReader(File.Open(filename, FileMode.Open))) {
                 int numToRead = (int)reader.ReadInt64();
                 int selectedParticleFromFile = (int)reader.ReadInt64();
+                numPhysicsFrames = reader.ReadInt64();
+                simulationStartTime = reader.ReadInt64();
+                totalSimulationTime = reader.ReadDouble();
                 int newParticleArraySize = minParticleBufferSize;
                 while (newParticleArraySize < numToRead) {
                     newParticleArraySize *= 2;
@@ -503,7 +559,7 @@ public class Main : MonoBehaviour
                     mass = reader.ReadDouble();
                     isBlackHole = reader.ReadByte() == 1;
                     
-                    particles[i] = new Particle(string.Format("Particle {0}", i), i, x, y, vx, vy, mass, isBlackHole);
+                    particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh, isBlackHole);
                     if (i == selectedParticleFromFile) {
                         selectNewParticle(selectedParticle);
                     }
@@ -530,62 +586,102 @@ public class Main : MonoBehaviour
         my = new double[particles.Length];
         mvx = new double[particles.Length];
         mvy = new double[particles.Length];
+        for (int i = 0; i < particles.Length; i++) {
+            if (particles[i] == null) {
+                particles[i] = placeholderParticle;
+            }
+        }
         physicsOutput2 = new PhysicsShaderOutputType[particles.Length];
     }
 
-    protected async virtual Task initParticles() {
-        particles = new Particle[initNumParticles];
+    protected async virtual Task initParticles(InitMode initMode) {
+        
         Debug.Log("Initialized particle array");
-        particles[0] = new Particle("Star", 0, 0, 0, 0, 0, 4000);
-        int numInFirstRing = 1024;
-        int maxThisRing = numInFirstRing;
-        int counter = 0;
-        int numRings = 0;
+        double starMass = 8000;
 
-        for (int i = 1; i < initNumParticles; i++) {
-            if (i % numParticleChecksPerYieldCheck == 0) {
-                await yieldCpuIfFrameTooLong();
-                if (cancelCalculation) {
-                    return;
-                }
-                #if UNITY_EDITOR
+
+        if (initMode == InitMode.SYSTEM) {
+            particles = new Particle[512];
+            particles[0] = new Particle("Star", 0, 0, 0, 0, 0, starMass, sphereMesh);
+            double mass, x, y, vx, vy;
+            for (int i = 1; i < 20; i++) {
+                mass = 0.05 * Pow(2, i / 1.5);
+                x = 30 * Pow(2, i / 2.0);
+                y = 0;
+                vx = 0;
+                vy = x / (x * Sqrt(x)) * Sqrt(G * starMass);
+                particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
+            }
+            mass = 0.01;
+            x = 30 * Pow(2, 9 / 2.0) + 3;
+            y = 0;
+            vx = 0;
+            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + 0.0015;
+            particles[20] = new Particle("Particle 20", 20, x, y, vx, vy, mass, sphereMesh);
+            mass = 20;
+            x = 30 * Pow(2, 15 / 2.0) + 5;
+            y = 0;
+            vx = 0;
+            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + 0.0035;
+            particles[15].vy -= 0.0015;
+            particles[21] = new Particle("Particle 21", 21, x, y, vx, vy, mass, sphereMesh);
+        } else {
+            particles = new Particle[initNumParticles];
+            if (initMode == InitMode.DISK) {
+                particles[0] = new Particle("Star", 0, 0, 0, 0, 0, starMass, sphereMesh);
+            }
+            int numInFirstRing = 1024;
+            int maxThisRing = numInFirstRing;
+            int counter = 0;
+            int numRings = 0;
+            int startIndex = initMode == InitMode.DISK ? 1 : 0;
+
+            for (int i = startIndex; i < initNumParticles; i++) {
+                if (i % numParticleChecksPerYieldCheck == 0) {
+                    await yieldCpuIfFrameTooLong();
+                    if (cancelCalculation) {
+                        return;
+                    }
+#if UNITY_EDITOR
                 if (!UnityEditor.EditorApplication.isPlaying) {
                     return;
                 }
-                #endif  
+#endif
+                }
+                if (counter == maxThisRing) {
+                    counter = 0;
+                    numRings++;
+                    maxThisRing = (int)(numInFirstRing * Pow(1.004f, numRings));
+                }
+                int numLeft = initNumParticles - i;
+                if (counter + numLeft < maxThisRing) {
+                    maxThisRing = numLeft;
+#if DEBUG_PHYSICS
+                    Debug.Log(string.Format("Final ring contains {0} particles", numLeft));
+#endif
+                }
+                double theta = (counter % maxThisRing) * 2 * PI / maxThisRing;
+
+                // pos = 5 * Random.insideUnitCircle;
+                double x = (350 + numRings * 2.0) * Sin(theta);
+                double y = (350 + numRings * 2.0) * Cos(theta);
+                double rsqr = Sqrt(Sqrt(x * x + y * y));
+
+                // float xrot = (float)(-pos.y / 400 / rsqr / Exp(rsqr / 5));
+                // float yrot = (float)(pos.x / 400 / rsqr / Exp(rsqr / 5));
+                double xrot = -y;
+                double yrot = x;
+
+                Vector2 rand = 0.002f * UnityEngine.Random.insideUnitCircle;
+
+                double vx = xrot * Sqrt(G * starMass) / rsqr / rsqr / rsqr + rand.x;
+                double vy = yrot * Sqrt(G * starMass) / rsqr / rsqr / rsqr + rand.y;
+
+                particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, initialMass, sphereMesh);
+                counter++;
             }
-            if (counter == maxThisRing) {
-                counter = 0;
-                numRings++;
-                maxThisRing = (int)(numInFirstRing * Pow(1.004f, numRings));
-            }
-            int numLeft = initNumParticles - i;
-            if (counter + numLeft < maxThisRing) {
-                maxThisRing = numLeft;
-                #if DEBUG_PHYSICS
-                Debug.Log(string.Format("Final ring contains {0} particles", numLeft));
-                #endif
-            }
-            double theta = (counter % maxThisRing) * 2 * PI / maxThisRing;
-
-            // pos = 5 * Random.insideUnitCircle;
-            double x = (350 + numRings * 2.0) * Sin(theta);
-            double y = (350 + numRings * 2.0) * Cos(theta);
-            double rsqr = Sqrt(Sqrt(x * x + y * y));
-
-            // float xrot = (float)(-pos.y / 400 / rsqr / Exp(rsqr / 5));
-            // float yrot = (float)(pos.x / 400 / rsqr / Exp(rsqr / 5));
-            double xrot = -y;
-            double yrot = x;
-
-            Vector2 rand = 0.002f * UnityEngine.Random.insideUnitCircle;
-
-            double vx = xrot / 11.3 / rsqr / rsqr / rsqr + rand.x;
-            double vy = yrot / 11.3 / rsqr / rsqr / rsqr + rand.y;
-
-            particles[i] = new Particle(string.Format("Particle {0}", i), i, x, y, vx, vy, initialMass);
-            counter++;
         }
+        simulationStartTime = DateTime.Now.Ticks;
     }
 
     protected async Task initializeShader(ComputeBuffer shaderInputBuffer, ComputeBuffer shaderOutputBuffer) {
@@ -760,8 +856,8 @@ public class Main : MonoBehaviour
                     continue;
                 }
                 massRatio = p1.mass / p2.mass;
-                dx = p2.x + halfStepSize * p2.vx - p1.x - halfStepSize * p1.vx;
-                dy = p2.y + halfStepSize * p2.vy - p1.y - halfStepSize * p1.vy;
+                dx = p2.x - p1.x;
+                dy = p2.y - p1.y;
                 r = Sqrt(dx * dx + dy * dy);
                 a = gStepSize * p2.mass / (r * r);
                 cpuOutputPixel.ax += a * dx / r;
@@ -786,6 +882,23 @@ public class Main : MonoBehaviour
                 }
             }
         }
+    }
+
+    public virtual void onPausePressed() {
+        setPaused(!paused);
+        
+    }
+
+    public virtual void setPaused(bool newPaused) {
+        this.paused = newPaused;
+        pauseButtonText.text = newPaused ? "Unpause" : "Pause";
+    }
+
+    public virtual void onQuit() {
+#if UNITY_EDITOR
+        UnityEditor.EditorApplication.ExitPlaymode();
+#endif
+        Application.Quit();
     }
 
     protected void dispatchCompute(int groupNumber) {
@@ -840,8 +953,8 @@ public class Main : MonoBehaviour
         centerOfMassVX /= totalMass;
         centerOfMassVY /= totalMass;
         double centerOfMassSpeed = Sqrt(centerOfMassVX * centerOfMassVX + centerOfMassVY * centerOfMassVY);
-        // Debug.Log(string.Format("{0} particles were calculated, {1} are alive", numWritten, numAlive));
-        // Debug.Log(string.Format("Center of mass moving with velocity {0}", centerOfMassSpeed));
+        Debug.Log(string.Format("{0} particles were calculated, {1} are alive", numWritten, numAlive));
+        Debug.Log(string.Format("Center of mass moving with velocity {0}", centerOfMassSpeed));
 
         #endif
 
@@ -858,6 +971,7 @@ public class Main : MonoBehaviour
             }
             p1 = particles[i];
             outputPixel = physicsOutput2[i];
+            #if UNITY_EDITOR
             if (outputPixel.idx != i) {
                 if (canPrintError) {
                     Debug.LogError(string.Format("Particle {0} was reported to have id {1} by shader", i, outputPixel.idx));
@@ -874,8 +988,9 @@ public class Main : MonoBehaviour
                 UnityEditor.EditorApplication.ExitPlaymode();
                 await Task.Yield();
             }
-            p1.vx += outputPixel.ax;
-            p1.vy += outputPixel.ay;
+            #endif
+            p1.vx += outputPixel.ax / (numPhysicsFrames == 0 ? 2 : 1); // initial frame applies only a half step to v
+            p1.vy += outputPixel.ay / (numPhysicsFrames == 0 ? 2 : 1); // initial frame applies only a half step to v; leapfrog integration
             mx[i] = particles[i].mass * particles[i].x;
             my[i] = particles[i].mass * particles[i].y;
             mvx[i] = particles[i].mass * particles[i].vx;
@@ -982,7 +1097,6 @@ public class Main : MonoBehaviour
         }
 
         particles = newParticles;
-        Debug.Log("Reinitialized particle array to smaller size");
         physicsOutput2 = new PhysicsShaderOutputType[particles.Length];
         mx = new double[particles.Length];
         my = new double[particles.Length];
