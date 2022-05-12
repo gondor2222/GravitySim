@@ -9,10 +9,12 @@ public class Particle
 {
 
     public static readonly double PI = 3.1415926535;
-    public static readonly double L_Sun = 3.83E26;
-    public static readonly double r_Jupiter = 6.9173E7;
-    public static readonly double SB = 5.670373E-8;
+    public static readonly double L_Sun = 3.83e26;
+    public static readonly double r_Jupiter = 6.9173e7;
+    public static readonly double r_Sun = 6.957e8;
+    public static readonly double SB = 5.670373e-8;
     public static bool exaggerateSmallParticles = true; // display objects larger than they actually are by this factor
+    public static double minDisplayScale = 1e-5;
 
     public volatile GameObject gameObject;
     private volatile Transform transform;
@@ -31,11 +33,13 @@ public class Particle
     public double lifeLeft;
     public double radius;
     public double luminosity;
+    public double surfaceTemperature;
+    public double albedo = 0.5;
     public string objectClass;
     public Color color;
     
     public bool removed;
-    public bool massDirty = true; // dirty flag for mass
+    public bool massDirty = false; // dirty flag for mass
     public double lastRenderX = double.PositiveInfinity;
     public double lastRenderY = double.PositiveInfinity;
     private static double lastRenderUpdateThreshold = 1e-4f;
@@ -45,8 +49,7 @@ public class Particle
         this.removed = true;
     }
     
-    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, Mesh meshToUse, bool isBlackHole = false)
-    {
+    public Particle(string name, int id, double x, double y, double vx, double vy, double mass, Mesh meshToUse, bool isBlackHole = false) {
         this.name = name;
         this.id = id;
         this.x = x;
@@ -66,7 +69,15 @@ public class Particle
         this.isBlackHole = isBlackHole;
         this.lifeLeft = 1;
 
-        updateNonPhysics(0);
+        updateRadius();
+        updateLuminosity();
+        updateTemperature();
+        this.surfaceTemperature = this.temperature;
+        updateColor();
+        updateStarClass();
+        updateGameObject(true);
+        updateLighting();
+        updateScale();
     }
 
     private static double[] starClassMinimumTemperatures = {
@@ -100,8 +111,7 @@ public class Particle
     };
 
     public void updateNonPhysics(double stepSize) {
-        if (massDirty)
-        {
+        if (massDirty) {
             string oldStarClass = objectClass;
             updateRadius();
             updateLuminosity();
@@ -110,41 +120,43 @@ public class Particle
             updateStarClass();
             updateGameObject(!objectClass.Equals(oldStarClass));
             massDirty = false;
-            double diameter = 2 * radius;
-
-            if (exaggerateSmallParticles) {
-                diameter = Sqrt(2 + diameter*diameter);
-            }
-
-            transform.localScale = (float)diameter * new Vector3(1, 1, 1);
+            updateScale();
         }
+        updateLighting();
         updateLife(stepSize);
         
     }
 
-    public void updatePhysics(double stepSize)
-    {
+    public void updateScale() {
+        double diameter = 2 * radius;
+
+        if (exaggerateSmallParticles && diameter < minDisplayScale) {
+            diameter = minDisplayScale;
+        }
+
+        transform.localScale = (float)diameter * new Vector3(1, 1, 1);
+    }
+
+    public void updatePhysics(double stepSize) {
         x += stepSize * vx;
         y += stepSize * vy;
         double r2FromLastRender = (lastRenderX - x) * (lastRenderX - x) + (lastRenderY - y ) * (lastRenderY - y);
-        if (r2FromLastRender > lastRenderUpdateThreshold)
-        {
-            transform.position = new Vector2((float)x, (float)y);
-            lastRenderX = x;
-            lastRenderY = y;
+        if (r2FromLastRender > 0.1 * minDisplayScale * minDisplayScale) {
+            updateTransform();
         }
         
     }
 
-    private void updateGameObject(bool classChanged)
-    {
+    public void updateTransform() {
+        transform.position = new Vector2((float)x, (float)y);
+        lastRenderX = x;
+        lastRenderY = y;
+    }
+
+    private void updateGameObject(bool classChanged) {
         if (gameObject != null) {
-            MaterialPropertyBlock newBlock = new MaterialPropertyBlock();
-            newBlock.SetFloat("_BaseTemperature", (float)temperature);
-            if (classChanged)
-            {
-                switch (objectClass)
-                {
+            if (classChanged) {
+                switch (objectClass) {
                     case "O-class Star":
                     case "B-class Star":
                     case "A-class Star":
@@ -165,20 +177,27 @@ public class Particle
                         break;
                     case "Gas Planet":
                     case "Rocky Planet":
+                        this.gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.plainThermalMaterial;
+                        break;
                     case "Black Hole":
                     default:
                         gameObject.GetComponent<MeshRenderer>().sharedMaterial = Main.blankMaterial;
                         break;
                 }
             }
+        }
+    }
+
+    private void updateLighting() {
+        if (gameObject != null) {
+            MaterialPropertyBlock newBlock = new MaterialPropertyBlock();
+            newBlock.SetFloat("_BaseTemperature", (float)surfaceTemperature);
             gameObject.GetComponent<MeshRenderer>().SetPropertyBlock(newBlock);
         }
     }
 
-    private void updateStarClass()
-    {
-        if (isBlackHole)
-        {
+    private void updateStarClass() {
+        if (isBlackHole) {
             objectClass = "Black Hole";
         }
         if (this.mass < 2 * Main.earthMass) {
@@ -196,8 +215,7 @@ public class Particle
         }
     }
 
-    private void updateTemperature()
-    {
+    private void updateTemperature() {
         /* L = SB * 4pi * r^2 * T^4
          * T^4 = L / ( SB * 4 * pi * r^2)
          * T = pow(L / SB / 4 / pi / r^2, 0.25)
@@ -208,204 +226,164 @@ public class Particle
 
     private void updateLuminosity() {
         double mFactor = this.mass / 1988;
-        if (mFactor > 20)
-        {
+        if (mFactor > 20) {
             this.luminosity = 58.8 * Pow(mFactor, 2.3) * L_Sun;
         }
-        else if (mFactor > 2)
-        {
+        else if (mFactor > 2) {
             this.luminosity = 1.82 * Pow(mFactor, 3.46) * L_Sun;
             //returns 1.5*2^3.5 at 2
         }
-        else if (mFactor > 1)
-        {
+        else if (mFactor > 1) {
             this.luminosity = Pow(mFactor, 4.33) * L_Sun;
         }
-        else if (mFactor > 0.4)
-        {
+        else if (mFactor > 0.4) {
             this.luminosity = Pow(mFactor, 3.75) * L_Sun;
         }
-        else
-        {
+        else {
             this.luminosity = Pow(mFactor, 4) * L_Sun;
         }
     }
 
 
-    private void updateRadius()
-    {
-        if (this.isBlackHole)
-        {
+    private void updateRadius() {
+        if (this.isBlackHole) {
             this.radius = Sqrt(this.mass) / 5000;
         }
         // above about 150 solar masses i.e. 300 000 e27 kg, further growth becomes impossible as extreme temperatures expel the outer layers of a star.
         // But we don't model that here :)
-        else if (this.mass > 159) // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
-        {
-            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.40;
+        else if (this.mass > 4000) { // approx 2 solar masses; larger stars, where additional mass is less effective at creating enough fusion to overcome gravity
+            this.radius = 0.3233 * Pow(this.mass, 0.60) * 0.40;
         }
-        else if (this.mass > 0.778) // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
-        {
-            this.radius = 3.36 * Pow(this.mass, -0.04) * 0.40; // 3.01 at upper end before scaling
+        else if (this.mass > 159) { // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
+            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.40; // 46.868 at upper end before scaling
+            // solar radius 10.13 with scaling
         }
-        else if (this.mass > 0.012)  // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
-        {
+        else if (this.mass > 0.778) { // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
+            this.radius = 3.362 * Pow(this.mass, -0.04) * 0.40; // 2.745 at upper end before scaling
+            // jupiter radius 1.31077 with scaling
+        }
+        else if (this.mass > 0.012) { // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
             this.radius = 3.94 * Pow(mass, 0.59) * 0.40; // 3.40 at upper end before scaling
         }
-        else // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression
-        {
+        else { // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression
             this.radius = 1.0 * Pow(mass, 0.28) * 0.40; // 0.290 at upper end before scaling
         }
         // below about 1e-6 units, objects begin to deviate significantly from round, and mean radius can't be predicted from mass even with known composition
         // but we don't model that here either
     }
 
-    private void updateColor()
-    {
+    private void updateColor() {
         double red, green, blue, temp;
         red = green = blue = 0;
         temp = this.temperature / 100;
-        if (Main.colorscheme == ColorScheme.NATURAL)
-        {
-            if (this.isBlackHole)
-            {
+        if (Main.colorscheme == ColorScheme.NATURAL) {
+            if (this.isBlackHole) {
                 this.color = new Color(0, 0, 0);
             }
-            else
-            {
-                if (temp < 66)
-                {
+            else {
+                if (temp < 66) {
                     red = 255;
                 }
-                else
-                {
+                else {
                     red = temp - 60;
                     red = 329.6987 * Pow(red, -0.1332);
-                    if (red < 0)
-                    {
+                    if (red < 0) {
                         red = 0;
                     }
-                    if (red > 255)
-                    {
+                    if (red > 255) {
                         red = 255;
                     }
                 }
-                if (temp <= 66)
-                {
+                if (temp <= 66) {
                     green = temp;
                     green = 99.47 * Log(green) - 161.1196;
                 }
-                else
-                {
+                else {
                     green = temp - 60;
                     green = 288.122 * Pow(green, -0.0755);
                 }
-                if (green < 0)
-                {
+                if (green < 0) {
                     green = 0;
                 }
-                if (green > 255)
-                {
+                if (green > 255) {
                     green = 255;
                 }
-                if (temp >= 66)
-                {
+                if (temp >= 66) {
                     blue = 255;
                 }
-                if (temp <= 19 && temp > 10)
-                {
+                if (temp <= 19 && temp > 10) {
                     blue = 50 - temp * temp;
                 }
-                if (temp < 10)
-                {
+                if (temp < 10) {
                     blue = 100 - temp * temp;
                 }
-                if (temp < 66 && temp > 19)
-                {
+                if (temp < 66 && temp > 19) {
                     blue = temp - 10;
                     blue = 138.5177 * Log(blue) - 305.0448;
                 }
-                if (blue < 0)
-                {
+                if (blue < 0) {
                     blue = 0;
                 }
-                if (blue > 255)
-                {
+                if (blue > 255) {
                     blue = 255;
                 }
-                if (temp < 10)
-                {
+                if (temp < 10) {
                     this.color = new Color((float)(red * temp * temp * temp / 1e3), (float)(green * temp * temp * temp / 1e3), (float)(blue));
                 }
-                else
-                {
+                else {
                     this.color = new Color((float)(red), (float)(green), (float)(blue));
                 }
             }
         }
-        else if (Main.colorscheme == ColorScheme.VELOCITY)
-        {
+        else if (Main.colorscheme == ColorScheme.VELOCITY) {
             double v = Sqrt(vx * vx + vy * vy);
             red = green = blue = 1000 * v;
-            if (red > 255)
-            {
+            if (red > 255) {
                 red = 255;
             }
-            if (green > 255)
-            {
+            if (green > 255) {
                 green = 255;
             }
-            if (blue > 255)
-            {
+            if (blue > 255) {
                 blue = 255;
             }
             this.color = new Color((float)red, (float)green, (float)blue);
         }
-        else if (Main.colorscheme == ColorScheme.LIFETIME)
-        {
+        else if (Main.colorscheme == ColorScheme.LIFETIME) {
             red = green = blue = lifeLeft / 4000000;
-            if (red > 255)
-            {
+            if (red > 255) {
                 red = 255;
             }
-            if (green > 255)
-            {
+            if (green > 255) {
                 green = 255;
             }
-            if (blue > 255)
-            {
+            if (blue > 255) {
                 blue = 255;
             }
             this.color = new Color((float)red, (float)green, (float)blue);
         }
-        else
-        {
+        else {
             this.color = new Color(0, 255, 0);
         }
     }
 
-    private void updateLife(double stepSize)
-    {
-        if (this.isBlackHole)
-        {
+    private void updateLife(double stepSize) {
+        if (this.isBlackHole) {
             return;
         }
         double penalty = mass * mass * mass / 1.5e12 * stepSize;
         this.lifeLeft -= penalty;
-        if (lifeLeft < 0)
-        {
+        if (lifeLeft < 0) {
             splinter();
         }
     }
 
-    public void remove()
-    {
+    public void remove() {
         this.removed = true;
         Object.DestroyImmediate(this.gameObject);
         this.gameObject = null;
     }
 
-    private void splinter()
-    {
+    private void splinter() {
     }
 }

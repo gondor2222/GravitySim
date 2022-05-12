@@ -34,7 +34,6 @@ public class MainBarnesHut : Main
     protected override void updatePhysicsOutput(Particle p1, ref PhysicsShaderOutputType outputPixel, bool printDebug=false)
     {
         double dx, dy, r, a, distanceToNode;
-        double halfStepSize = 0.5 * Main.stepSize;
         int collisionIndex = 0, nodeToCheck = 0;
         QuadTreeNode node;
         while (nodeToCheck != -1)
@@ -81,8 +80,8 @@ public class MainBarnesHut : Main
                 distanceToNode = Sqrt((p1.x - node.centerOfMassX) * (p1.x - node.centerOfMassX) + (p1.y - node.centerOfMassY) * (p1.y - node.centerOfMassY));
                 if (node.width / distanceToNode < barnesHutThreshold) // treat as leaf, i.e. skip over children
                 {
-                    dx = node.centerOfMassX - p1.x + halfStepSize * (node.vx - p1.vx);
-                    dy = node.centerOfMassY - p1.y + halfStepSize * (node.vy - p1.vy);
+                    dx = node.centerOfMassX - p1.x;
+                    dy = node.centerOfMassY - p1.y;
                     r = Sqrt(dx * dx + dy * dy);
                     a = gStepSize * node.totalMass / (r * r);
                     outputPixel.ax += a * dx / r;
