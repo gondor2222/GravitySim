@@ -260,19 +260,18 @@ public class Particle
         }
         // above about 150 solar masses i.e. 300 000 e27 kg, further growth becomes impossible as extreme temperatures expel the outer layers of a star.
         // But we don't model that here :)
-        else if (this.mass > 4000e3) { // approx 2 solar masses; larger stars, where additional mass is less effective at creating enough fusion to overcome gravity
+        else if (this.mass > 4000e6) { // approx 2 solar masses; larger stars, where additional mass is less effective at creating enough fusion to overcome gravity
             this.radius = 2.230e3 * Pow(this.mass, 0.60);
         }
-        else if (this.mass > 159e3) { // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
+        else if (this.mass > 159e6) { // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
             this.radius = 4.5695 * Pow(this.mass, 0.88); // 1.2873e9 at upper end
             // solar radius set to be actual 6.957e8m using this scale
         }
         //jupiter mass ~1.898
-        else if (this.mass > 0.778e3) { // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
+        else if (this.mass > 0.778e6) { // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
             this.radius = 1.603e8 * Pow(this.mass, -0.04); // 7.535e7 at upper end
-            // jupiter radius 1.31077 with scaling
         }
-        else if (this.mass > 0.012e3) { // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
+        else if (this.mass > 0.012e6) { // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
             this.radius = 3.118e4 * Pow(mass, 0.59); // 9.322e7 at upper end
         }
         else { // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression

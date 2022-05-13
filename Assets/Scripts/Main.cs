@@ -128,6 +128,8 @@ public class Main : MonoBehaviour {
     // Prevent update from trying to call a new physics step if calculations for the previous step are ongoing
     protected volatile bool physicsOngoing = false;
 
+    protected volatile bool handlingInput = false;
+
     protected volatile bool isInitializing = false;
 
     protected bool draggedDuringClick = false;
@@ -296,7 +298,11 @@ public class Main : MonoBehaviour {
     protected async void Update() {
         
         lastYieldTime = Time.realtimeSinceStartupAsDouble;
-        handleInput();
+        if (!handlingInput) {
+            handlingInput = true;
+            await handleInput();
+            handlingInput = false;
+        }
         if (!isReady) {
             return;
         }
@@ -437,7 +443,7 @@ public class Main : MonoBehaviour {
         if (selectedParticle != -1 && !particles[selectedParticle].removed) {
             particles[selectedParticle].gameObject.layer = 3;
             focusCamera.transform.parent = particles[selectedParticle].gameObject.transform;
-            focusCamera.transform.localPosition = new Vector3(0, 0, -10);
+            focusCamera.transform.localPosition = new Vector3(0, 0, -50);
             focusCamera.orthographicSize =(float)particles[selectedParticle].gameObject.transform.localScale.x;
             particleInformationText.text = buildParticleInformation(particles[selectedParticle]);
 
@@ -446,7 +452,7 @@ public class Main : MonoBehaviour {
         }
     }
 
-    protected void selectNewParticle(int particleIdx) {
+    protected async Task selectNewParticle(int particleIdx) {
         // Debug.Log(string.Format("Selecting particle {0}", particleIdx));
         bool selectionChanged = selectedParticle != particleIdx;
         if (selectedParticle != -1) {
@@ -455,10 +461,13 @@ public class Main : MonoBehaviour {
         if (selectionChanged) {
             selectedParticle = particleIdx;
             updateParticleDisplay();
-            
+
+            await centerReferenceFrame(particleIdx);
+
             focusCamera.enabled = true;
             selectionIcon.GetComponent<Image>().enabled = true;
             selectionIcon.GetComponent<RectTransform>().position = particles[selectedParticle].gameObject.transform.position;
+            
         }
     }
 
@@ -466,7 +475,7 @@ public class Main : MonoBehaviour {
         selectionIcon.GetComponent<RectTransform>().Rotate(new Vector3(0, 0, (float)(-100.0 / targetFps)));
     }
 
-    protected void handleInput() {
+    protected async Task handleInput() {
         
         bool menuPressed = Input.GetAxis("Menu") != 0;
 
@@ -550,13 +559,13 @@ public class Main : MonoBehaviour {
                     }
                 }
                 if (toSelect != -1) {
-                    selectNewParticle(toSelect);
+                    await selectNewParticle(toSelect);
                 }
             }
 
             if (zoomChange != 0) {
                 double oldSize = mainCamera.orthographicSize;
-                float newSize = Mathf.Clamp((float)(mainCamera.orthographicSize * Pow(1.2, zoomChange)), 0.1f, 1e3f);
+                float newSize = Mathf.Clamp((float)(mainCamera.orthographicSize * Pow(1.2, zoomChange)), 1e-2f, 1e3f);
                 mainCamera.orthographicSize = newSize;
                 if (selectedParticle != -1 && isReady) {
                     float newSelectionSize = Mathf.Max((float)(0.03 * mainCamera.orthographicSize), (float)(2 * particles[selectedParticle].gameObject.transform.localScale.x));
@@ -717,7 +726,7 @@ public class Main : MonoBehaviour {
                     
                     particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh, isBlackHole);
                     if (i == selectedParticleFromFile) {
-                        selectNewParticle(selectedParticle);
+                        await selectNewParticle(selectedParticle);
                     }
                 }
 
@@ -756,7 +765,7 @@ public class Main : MonoBehaviour {
 
         double baseDistance = 5.5e8;
         double baseDistanceGrowth = 0.7;
-        double baseMass = 0.01e3;
+        double baseMass = 0.01e5;
         double baseMassGrowth = 0.63;
 
 
@@ -776,48 +785,48 @@ public class Main : MonoBehaviour {
             y = 0;
             vx = 0;
 
-            mass = 0.0001 * baseMass * Pow(2, 2 * baseMassGrowth); ;
-            x = baseDistance * Pow(2, 2 * baseDistanceGrowth) + 0.04 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[2].mass) / Sqrt(0.032 * baseDistance);
+            mass = 0.0001 * particles[4].mass;
+            x = particles[4].x + 0.015 * baseDistance;
+            vy = particles[4].vy + Sqrt(G * particles[4].mass) / Sqrt(0.014 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
 
-            mass = 0.001 * baseMass * Pow(2, 9 * baseMassGrowth); ;
-            x = baseDistance * Pow(2, 9 * baseDistanceGrowth) + 0.3 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[9].mass) / Sqrt(0.3 * baseDistance);
+            mass = 0.001 * particles[9].mass;
+            x = particles[9].x + 0.3 * baseDistance;
+            vy = particles[9].vy + Sqrt(G * particles[9].mass) / Sqrt(0.3 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
-            x = baseDistance * Pow(2, 9 * baseDistanceGrowth) + 0.476 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[9].mass) / Sqrt(0.476 * baseDistance);
+            x = particles[9].x + 0.476 * baseDistance;
+            vy = particles[9].vy + Sqrt(G * particles[9].mass) / Sqrt(0.476 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
-            x = baseDistance * Pow(2, 9 * baseDistanceGrowth) + 0.756 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[9].mass) / Sqrt(0.756 * baseDistance);
+            x = particles[9].x + 0.756 * baseDistance;
+            vy = particles[9].vy + Sqrt(G * particles[9].mass) / Sqrt(0.756 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
-            x = baseDistance * Pow(2, 9 * baseDistanceGrowth) + 1.2 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[9].mass) / Sqrt(1.2 * baseDistance);
+            x = particles[9].x + 1.2 * baseDistance;
+            vy = particles[9].vy + Sqrt(G * particles[9].mass) / Sqrt(1.2 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
 
-            mass = 0.5 * baseMass * Pow(2, 15 * baseMassGrowth);
-            x = baseDistance * Pow(2, 15 * baseDistanceGrowth) + 0.2 * baseDistance;
-            vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + 0.7 * Sqrt(G * particles[15].mass) / Sqrt(0.2 * baseDistance);
-            particles[15].vy -= 0.5 * Sqrt(G * particles[15].mass) / Sqrt(0.2 * baseDistance);
+            mass = 0.5 * particles[15].mass;
+            x = particles[15].x + 0.4 * baseDistance;
+            vy = particles[15].vy + 0.75 * Sqrt(G * particles[15].mass) / Sqrt(0.30 * baseDistance);
+            particles[15].vy -= 0.5 * Sqrt(G * particles[15].mass) / Sqrt(0.30 * baseDistance);
             particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
             i++;
 
             for (int n = 0; n < 3; n++) {
-                mass = 1e-4 * baseMass * Pow(2, 19 * baseMassGrowth);
-                x = baseDistance * Pow(2, 19 * baseDistanceGrowth) + 0.2 * baseDistance * (n + 1);
-                vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[19].mass) / Sqrt(0.2 * baseDistance * (n + 1));
+                mass = 1e-4 * particles[19].mass;
+                x = particles[19].x + 0.2 * baseDistance * (n + 1);
+                vy = particles[19].vy + Sqrt(G * particles[19].mass) / Sqrt(0.2 * baseDistance * (n + 1));
                 particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
                 i++;
             }
             for (int n = 0; n < 5; n++) {
-                mass = 1e-7 * baseMass * Pow(2, 19 * baseMassGrowth);
-                x = baseDistance * Pow(2, 19 * baseDistanceGrowth) + 1.5 * baseDistance * ( 1 + 0.3 * n) ;
-                vy = x / (x * Sqrt(x)) * Sqrt(G * starMass) + Sqrt(G * particles[19].mass) * 1.3 / Sqrt(1.5 * baseDistance * ( 1 + 0.3 * n));
+                mass = 1e-8 * particles[19].mass;
+                x = particles[19].x + 1.5 * baseDistance * ( 1 + 0.3 * n) ;
+                vy = particles[19].vy + Sqrt(G * particles[19].mass) * 1.35 / Sqrt(1.5 * baseDistance * ( 1 + 0.3 * n));
                 particles[i] = new Particle("Particle " + i, i, x, y, vx, vy, mass, sphereMesh);
                 i++;
             }
@@ -914,29 +923,36 @@ public class Main : MonoBehaviour {
         computeShader.SetBuffer(computeShaderKernelIndex, "outputData", shaderOutputBuffer);
     }
 
-    protected virtual async Task centerReferenceFrame() {
+    protected virtual async Task centerReferenceFrame(int particleIdx = -1) {
         double centerOfMassX = 0;
         double centerOfMassY = 0;
         double centerOfMassVX = 0;
         double centerOfMassVY = 0;
-        double totalMass = 0;
         int n = particles.Length;
-        for (int i = 0; i < n; i++) {
-            if (i % numParticleChecksPerYieldCheck == 0) {
-                await yieldCpuIfFrameTooLong();
+        if (particleIdx == -1 || particles[particleIdx].removed) {
+            double totalMass = 0;
+            for (int i = 0; i < n; i++) {
+                if (i % numParticleChecksPerYieldCheck == 0) {
+                    await yieldCpuIfFrameTooLong();
+                }
+                if (!particles[i].removed) {
+                    centerOfMassX += particles[i].mass * particles[i].x;
+                    centerOfMassY += particles[i].mass * particles[i].y;
+                    centerOfMassVX += particles[i].mass * particles[i].vx;
+                    centerOfMassVY += particles[i].mass * particles[i].vy;
+                    totalMass += particles[i].mass;
+                }
             }
-            if (!particles[i].removed) {
-                centerOfMassX += particles[i].mass * particles[i].x;
-                centerOfMassY += particles[i].mass * particles[i].y;
-                centerOfMassVX += particles[i].mass * particles[i].vx;
-                centerOfMassVY += particles[i].mass * particles[i].vy;
-                totalMass += particles[i].mass;
-            }
+            centerOfMassX /= totalMass;
+            centerOfMassY /= totalMass;
+            centerOfMassVX /= totalMass;
+            centerOfMassVY /= totalMass;
+        } else {
+            centerOfMassX = particles[particleIdx].x;
+            centerOfMassY = particles[particleIdx].y;
+            centerOfMassVX = particles[particleIdx].vx;
+            centerOfMassVY = particles[particleIdx].vy;
         }
-        centerOfMassX /= totalMass;
-        centerOfMassY /= totalMass;
-        centerOfMassVX /= totalMass;
-        centerOfMassVY /= totalMass;
 
         for (int i = 0; i < n; i++) {
             if (i % numParticleChecksPerYieldCheck == 0) {
@@ -950,6 +966,8 @@ public class Main : MonoBehaviour {
                 particles[i].updateTransform();
             }
         }
+
+        mainCamera.transform.position -= new Vector3((float)centerOfMassX, (float)centerOfMassY, 0) / (float)distanceScale;
     }
 
     protected virtual async Task gravitate() {
@@ -1259,7 +1277,7 @@ public class Main : MonoBehaviour {
                     mvx[i] = p1.mass * p1.vx;
                     mvy[i] = p1.mass * p1.vy;
                     if (selectedParticle == j) {
-                        selectNewParticle(i);
+                        await selectNewParticle(i);
                     }
                     p2.remove();
                     await yieldCpuIfFrameTooLong();
