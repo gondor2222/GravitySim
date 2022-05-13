@@ -130,8 +130,8 @@ public class MainBarnesHut : Main
         computeShader.SetFloat("barnesHutThreshold", (float)barnesHutThreshold);
     }
 
-    override protected async Task initVariables() {
-        await base.initVariables();
+    override protected void initVariables() {
+        base.initVariables();
         Debug.Log("Initializing node list");
         nodeList = new QuadTreeNode[(int)(2 * particles.Length)];
     }

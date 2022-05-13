@@ -10,11 +10,14 @@ public class Particle
 
     public static readonly double PI = 3.1415926535;
     public static readonly double L_Sun = 3.83e26;
-    public static readonly double r_Jupiter = 6.9173e7;
+    public static readonly double r_Jupiter = 6.9173e7; // meters
     public static readonly double r_Sun = 6.957e8;
     public static readonly double SB = 5.670373e-8;
     public static bool exaggerateSmallParticles = true; // display objects larger than they actually are by this factor
-    public static double minDisplayScale = 1e-5;
+    public static double minDisplayScale = 1e-10;
+    public static readonly double radiusScale = 1e2;
+
+    public static readonly double r_Jupiter_scaled = r_Jupiter / radiusScale; // jupiter radius in in-game radius units
 
     public volatile GameObject gameObject;
     private volatile Transform transform;
@@ -34,7 +37,7 @@ public class Particle
     public double radius;
     public double luminosity;
     public double surfaceTemperature;
-    public double albedo = 0.5;
+    public double albedo = 0.0;
     public string objectClass;
     public Color color;
     
@@ -42,7 +45,8 @@ public class Particle
     public bool massDirty = false; // dirty flag for mass
     public double lastRenderX = double.PositiveInfinity;
     public double lastRenderY = double.PositiveInfinity;
-    private static double lastRenderUpdateThreshold = 1e-4f;
+    public double lastRenderDX = 0;
+    public double lastRenderDY = 0;
 
     public Particle(string name) {
         this.name = name;
@@ -130,25 +134,30 @@ public class Particle
     public void updateScale() {
         double diameter = 2 * radius;
 
-        if (exaggerateSmallParticles && diameter < minDisplayScale) {
-            diameter = minDisplayScale;
+        if (exaggerateSmallParticles && diameter < 15 * minDisplayScale) {
+            diameter = 15 * minDisplayScale;
         }
 
         transform.localScale = (float)diameter * new Vector3(1, 1, 1);
     }
 
-    public void updatePhysics(double stepSize) {
+    public bool updatePhysics(double stepSize) {
         x += stepSize * vx;
         y += stepSize * vy;
         double r2FromLastRender = (lastRenderX - x) * (lastRenderX - x) + (lastRenderY - y ) * (lastRenderY - y);
-        if (r2FromLastRender > 0.1 * minDisplayScale * minDisplayScale) {
+        if (r2FromLastRender > minDisplayScale * minDisplayScale) {
             updateTransform();
+            return true;
         }
+
+        return false;
         
     }
 
     public void updateTransform() {
         transform.position = new Vector2((float)x, (float)y);
+        lastRenderDX = x - lastRenderX;
+        lastRenderDY = y - lastRenderY;
         lastRenderX = x;
         lastRenderY = y;
     }
@@ -220,7 +229,7 @@ public class Particle
          * T^4 = L / ( SB * 4 * pi * r^2)
          * T = pow(L / SB / 4 / pi / r^2, 0.25)
          */
-        double Rt = this.radius * r_Jupiter;
+        double Rt = this.radius * r_Jupiter_scaled;
         this.temperature = Pow(this.luminosity / 4 / PI / Rt / Rt / SB, 0.25);
     }
 
@@ -252,21 +261,21 @@ public class Particle
         // above about 150 solar masses i.e. 300 000 e27 kg, further growth becomes impossible as extreme temperatures expel the outer layers of a star.
         // But we don't model that here :)
         else if (this.mass > 4000) { // approx 2 solar masses; larger stars, where additional mass is less effective at creating enough fusion to overcome gravity
-            this.radius = 0.3233 * Pow(this.mass, 0.60) * 0.40;
+            this.radius = 0.1293 * Pow(this.mass, 0.60) * radiusScale;
         }
         else if (this.mass > 159) { // 84 jupiter masses i.e. 0.08 solar masses: stars, heat from fusion gradually dominates gravitational effects
-            this.radius = 0.0317 * Pow(this.mass, 0.88) * 0.40; // 46.868 at upper end before scaling
+            this.radius = 0.01268 * Pow(this.mass, 0.88) * radiusScale; // 46.868 at upper end before scaling
             // solar radius 10.13 with scaling
         }
         else if (this.mass > 0.778) { // 130 earth masses i.e. 0.41 jupiter masses: jupiters and brown dwarfs, gravity slowly begins to shrink the object as mass increases
-            this.radius = 3.362 * Pow(this.mass, -0.04) * 0.40; // 2.745 at upper end before scaling
+            this.radius = 1.3448 * Pow(this.mass, -0.04) * radiusScale; // 2.745 at upper end before scaling
             // jupiter radius 1.31077 with scaling
         }
         else if (this.mass > 0.012) { // 2 earth masses: gas/ice dwarfs such as neptune, runaway increase in size due to rapid accumulation of low-density volatiles
-            this.radius = 3.94 * Pow(mass, 0.59) * 0.40; // 3.40 at upper end before scaling
+            this.radius = 1.576 * Pow(mass, 0.59) * radiusScale; // 3.40 at upper end before scaling
         }
         else { // less than 2 earth masses; radius grows approximately with cube root of mass, with only minor corrections due to gravitational compression
-            this.radius = 1.0 * Pow(mass, 0.28) * 0.40; // 0.290 at upper end before scaling
+            this.radius = 0.4 * Pow(mass, 0.28) * radiusScale; // 0.290 at upper end before scaling
         }
         // below about 1e-6 units, objects begin to deviate significantly from round, and mean radius can't be predicted from mass even with known composition
         // but we don't model that here either
